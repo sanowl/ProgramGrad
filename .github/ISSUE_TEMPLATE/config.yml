@@ -1,0 +1,6 @@
+blank_issues_enabled: true
+contact_links:
+  - name: ProgramGrad documentation
+    url: https://github.com/sanowl/ProgramGrad#readme
+    about: Read the project thesis, install flow, examples, and limitations.
+

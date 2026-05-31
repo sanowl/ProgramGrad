@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "programgrad"
+version = "0.1.0a0"
+description = "A research-oriented scalar framework for differentiable program traces."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "ProgramGrad contributors" }]
+license = { text = "MIT" }
+keywords = ["autograd", "differentiable-programming", "program-traces", "surrogate-gradients"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/sanowl/ProgramGrad"
+Repository = "https://github.com/sanowl/ProgramGrad"
+Issues = "https://github.com/sanowl/ProgramGrad/issues"
+
+[tool.setuptools.packages.find]
+include = ["programgrad*"]

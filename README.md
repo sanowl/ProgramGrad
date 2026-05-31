@@ -1,0 +1,111 @@
+# ProgramGrad
+
+[![CI](https://github.com/sanowl/ProgramGrad/actions/workflows/ci.yml/badge.svg)](https://github.com/sanowl/ProgramGrad/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)
+![Status](https://img.shields.io/badge/status-v0.1--alpha-orange)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Gradients over programs, not only tensors.
+
+ProgramGrad is a small research-oriented framework for differentiable discrete
+program decisions. It records the hard execution trace of a Python-like
+algorithm, builds a differentiable soft shadow trace, and reports what each
+surrogate gradient means.
+
+It is not a PyTorch replacement. It is a trace laboratory for branches, loops,
+argmax choices, thresholds, and reasoning/search programs.
+
+## What is implemented
+
+- Scalar reverse-mode `Tensor` with operator overloads.
+- Finite-difference `gradcheck`.
+- Trace IR for ops, branches, searches, loop frames, and semantic ledger entries.
+- `soft_if`, `diff_if`, `soft_argmax`, `soft_select`, and bounded loop relaxation.
+- Hard-soft fidelity reports: output gap, path agreement, entropy, temperature.
+- SVG and JSON trace export.
+- Demos for learnable branch thresholds and tiny differentiable tree search.
+
+## Install
+
+ProgramGrad is not published to PyPI yet. Install it from a checkout:
+
+```bash
+git clone https://github.com/sanowl/ProgramGrad.git
+cd ProgramGrad
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+Or install directly from GitHub:
+
+```bash
+python -m pip install "git+https://github.com/sanowl/ProgramGrad.git"
+```
+
+## Example
+
+```python
+from programgrad import Tensor, soft_if, trace
+
+x = Tensor(0.7, name="x")
+threshold = Tensor(1.0, requires_grad=True, name="threshold")
+
+with trace(mode="dual", relaxation="soft_gate", fidelity=True) as tr:
+    score = x - threshold
+    y = soft_if(score, true_value=2 * x, false_value=x**2, beta=5.0)
+    loss = (y - 1.4) ** 2
+    loss.backward()
+
+print(threshold.grad)
+print(tr.show())
+tr.export_svg("threshold_trace.svg")
+```
+
+The trace reports the hard branch, the soft gate, the hard-soft output gap, and
+a ledger warning that the gradient is a surrogate gradient rather than the true
+derivative of a discontinuous branch.
+
+## Trace screenshots
+
+The demo traces are intentionally inspectable. They show the hard decision,
+soft surrogate value, fidelity gap, and semantic gradient warning.
+
+### Learnable branch threshold
+
+![ProgramGrad threshold trace](docs/assets/threshold-demo.svg)
+
+### Tiny differentiable tree search
+
+![ProgramGrad tree search trace](docs/assets/tree-search-demo.svg)
+
+## Run tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+## Run demos
+
+```bash
+python examples/learnable_threshold.py
+python examples/tiny_tree_search.py
+```
+
+Each demo prints the trace ledger and writes an SVG trace in the current
+directory. The CI workflow runs both demos after installing the package.
+
+## Project position
+
+ProgramGrad focuses on interpretability and semantics, not speed or broad
+operator coverage. Existing AD systems are excellent for tensor programs and
+compiler lowering. ProgramGrad targets a narrower gap: making the gradient of an
+algorithmic decision understandable.
+
+The public thesis is:
+
+> ProgramGrad is a research-oriented framework for differentiable program
+> traces. It studies how hard algorithmic decisions can be paired with soft
+> surrogate traces, semantic gradient contracts, and fidelity metrics,
+> especially for reasoning and search algorithms.

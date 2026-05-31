@@ -1,0 +1,45 @@
+name: Feature request
+description: Propose a new primitive, metric, trace export, or API improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What research or engineering gap would this feature address?
+      placeholder: I want ProgramGrad to expose temperature sensitivity for soft_select because...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the primitive, API, metric, or workflow.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Autograd core
+        - Trace IR
+        - Control-flow primitive
+        - Fidelity metric
+        - Visualization/export
+        - Documentation
+        - Demo
+    validations:
+      required: true
+  - type: textarea
+    id: semantics
+    attributes:
+      label: Gradient semantics
+      description: If this creates gradients through a discrete decision, what should the semantic contract say?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other APIs, estimators, or scope limits.
+

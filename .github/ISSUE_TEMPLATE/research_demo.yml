@@ -1,0 +1,38 @@
+name: Research demo
+description: Suggest or scope a demo that showcases differentiable program traces.
+title: "[Demo]: "
+labels: ["demo", "research"]
+body:
+  - type: textarea
+    id: claim
+    attributes:
+      label: Technical claim
+      description: What should this demo prove?
+      placeholder: A bounded early-stopping controller can learn a stop threshold while reporting hard-soft drift.
+    validations:
+      required: true
+  - type: textarea
+    id: hard_program
+    attributes:
+      label: Hard program
+      description: Describe the exact algorithmic decision path.
+    validations:
+      required: true
+  - type: textarea
+    id: soft_surrogate
+    attributes:
+      label: Soft surrogate
+      description: Describe the relaxation, estimator, temperature, or candidate weighting.
+    validations:
+      required: true
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Evaluation metrics
+      description: Hard objective, soft loss, fidelity report, entropy, gradcheck, or visualization expectations.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Related papers, systems, or examples.
+
