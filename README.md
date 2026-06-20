@@ -22,6 +22,7 @@ argmax choices, thresholds, and reasoning/search programs.
 - Trace IR for ops, branches, searches, loop frames, and semantic ledger entries.
 - `soft_if`, `diff_if`, `soft_argmax`, `soft_select`, and bounded loop relaxation.
 - Hard-soft fidelity reports: output gap, path agreement, entropy, temperature.
+- Hard-vs-soft evaluation tables and temperature sensitivity reports.
 - SVG and JSON trace export.
 - Demos for learnable branch thresholds and tiny differentiable tree search.
 
@@ -94,7 +95,9 @@ python examples/tiny_tree_search.py
 ```
 
 Each demo prints the trace ledger and writes an SVG trace in the current
-directory. The CI workflow runs both demos after installing the package.
+directory. They also print hard-vs-soft evaluation tables and temperature
+sensitivity reports. The CI workflow runs both demos after installing the
+package.
 
 ## Project position
 
@@ -102,6 +105,9 @@ ProgramGrad focuses on interpretability and semantics, not speed or broad
 operator coverage. Existing AD systems are excellent for tensor programs and
 compiler lowering. ProgramGrad targets a narrower gap: making the gradient of an
 algorithmic decision understandable.
+
+For deeper details, see [semantics](docs/semantics.md),
+[evaluation reports](docs/evaluation.md), and [limitations](docs/limitations.md).
 
 The public thesis is:
 

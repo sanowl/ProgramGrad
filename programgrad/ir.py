@@ -116,6 +116,10 @@ class LedgerEntry:
     surrogate_type: str
     gradient_contract: str
     bias_warning: str
+    approximates: str = ""
+    gradient_flows_to: list[str] = field(default_factory=list)
+    estimator: str = "surrogate"
+    recommended_checks: list[str] = field(default_factory=list)
     fidelity_metrics: FidelityMetrics | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -123,4 +127,3 @@ class LedgerEntry:
         if self.fidelity_metrics is not None:
             data["fidelity_metrics"] = self.fidelity_metrics.to_dict()
         return data
-

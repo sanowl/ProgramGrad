@@ -17,7 +17,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from programgrad import Tensor, soft_select, trace
+from programgrad import (
+    Tensor,
+    format_hard_soft_table,
+    format_temperature_table,
+    hard_soft_rows,
+    soft_select,
+    temperature_sensitivity,
+    trace,
+)
+
+TARGET = 3.2
 
 
 @dataclass(frozen=True)
@@ -94,7 +104,7 @@ def train(steps: int = 80, lr: float = 0.05) -> tuple[list[Tensor], object]:
         Tensor(0.1, requires_grad=True, name="theta_b"),
         Tensor(0.1, requires_grad=True, name="theta_cost"),
     ]
-    target = Tensor(3.2, name="target")
+    target = Tensor(TARGET, name="target")
     final_trace = None
 
     for step in range(steps):
@@ -117,11 +127,32 @@ def train(steps: int = 80, lr: float = 0.05) -> tuple[list[Tensor], object]:
     return theta, final_trace
 
 
+def run_tree_once(theta_values: list[float], tau: float) -> tuple[Tensor, object]:
+    theta = [
+        Tensor(theta_values[0], requires_grad=True, name="theta_a"),
+        Tensor(theta_values[1], requires_grad=True, name="theta_b"),
+        Tensor(theta_values[2], requires_grad=True, name="theta_cost"),
+    ]
+    with trace(mode="dual", relaxation="softmax_select", fidelity=True, record_ops=False) as tr:
+        y = soft_tree_value(TREE, theta, tau=tau)
+    return y, tr
+
+
 if __name__ == "__main__":
     theta, tr = train()
     out = Path("tree_search_trace.svg")
     tr.export_svg(out)
+    theta_values = [param.data for param in theta]
+    sensitivity = temperature_sensitivity(
+        lambda tau: run_tree_once(theta_values, tau),
+        [0.25, 0.5, 0.65, 1.0],
+        target=TARGET,
+    )
     print("learned theta:", ", ".join(f"{param.name}={param.data:.4f}" for param in theta))
     print(f"hard tree value after training: {hard_tree_value(TREE, theta):.4f}")
     print(tr.show())
+    print("\nhard-vs-soft evaluation:")
+    print(format_hard_soft_table(hard_soft_rows(tr, target=TARGET)))
+    print("\ntemperature sensitivity:")
+    print(format_temperature_table(sensitivity))
     print(f"wrote {out}")

@@ -32,6 +32,9 @@ def _record_branch(
     estimator: str,
     gradient_contract: str,
     bias_warning: str,
+    approximates: str,
+    gradient_flows_to: list[str],
+    recommended_checks: list[str],
 ) -> None:
     tr = current_trace()
     if tr is None:
@@ -77,6 +80,10 @@ def _record_branch(
         surrogate_type=surrogate_type,
         gradient_contract=gradient_contract,
         bias_warning=bias_warning,
+        approximates=approximates,
+        gradient_flows_to=gradient_flows_to,
+        estimator=estimator,
+        recommended_checks=recommended_checks,
         fidelity_metrics=metrics,
     )
     tr.record_branch(branch, ledger)
@@ -104,11 +111,12 @@ def soft_if(
 
     hard_true = score_t.data > 0.0
     hard_out = true_t if hard_true else false_t
-    out.hard_value = hard_out.data
+    hard_out_value = hard_out.hard_value if hard_out.hard_value is not None else hard_out.data
+    out.hard_value = hard_out_value
     _record_branch(
         score=score_t,
         selected_path="true" if hard_true else "false",
-        output_hard=hard_out.data,
+        output_hard=hard_out_value,
         output_soft=out.data,
         gate=gate.data,
         beta=beta,
@@ -122,6 +130,14 @@ def soft_if(
             "This is not the exact derivative of the discontinuous hard branch; "
             "it is the derivative of the relaxed surrogate."
         ),
+        approximates="hard branch indicator 1[score > 0]",
+        gradient_flows_to=["true_value", "false_value", "score", "score parents"],
+        recommended_checks=[
+            "finite-difference gradcheck on the soft surrogate",
+            "hard-vs-soft output gap",
+            "temperature sensitivity",
+            "hard objective after training",
+        ],
     )
     return out
 
@@ -147,11 +163,12 @@ def diff_if(
 
     if mode == "pathwise":
         out = _value(true_fn if hard_true else false_fn)
-        out.hard_value = out.data
+        hard_out_value = out.hard_value if out.hard_value is not None else out.data
+        out.hard_value = hard_out_value
         _record_branch(
             score=score_t,
             selected_path="true" if hard_true else "false",
-            output_hard=out.data,
+            output_hard=hard_out_value,
             output_soft=None,
             gate=None,
             beta=None,
@@ -162,6 +179,12 @@ def diff_if(
                 "the hard comparison contributes no useful branch-boundary gradient."
             ),
             bias_warning="Pathwise mode is honest but cannot train a hard threshold directly.",
+            approximates="selected hard branch only",
+            gradient_flows_to=["selected branch value"],
+            recommended_checks=[
+                "confirm the hard path is expected",
+                "use soft mode if branch-boundary learning is required",
+            ],
         )
         return out
 
@@ -177,11 +200,13 @@ def diff_if(
     soft_gate = sigmoid_gate(score_t, beta=beta)
     out = gate * true_t + (1.0 - gate) * false_t
     soft_out = soft_gate * true_t + (1.0 - soft_gate) * false_t
-    out.hard_value = (true_t if hard_true else false_t).data
+    hard_out = true_t if hard_true else false_t
+    hard_out_value = hard_out.hard_value if hard_out.hard_value is not None else hard_out.data
+    out.hard_value = hard_out_value
     _record_branch(
         score=score_t,
         selected_path="true" if hard_true else "false",
-        output_hard=out.hard_value,
+        output_hard=hard_out_value,
         output_soft=soft_out.data,
         gate=soft_gate.data,
         beta=beta,
@@ -192,6 +217,13 @@ def diff_if(
             "surrogate gate gradient."
         ),
         bias_warning="Straight-through gradients are biased estimators, not true hard-branch derivatives.",
+        approximates="hard branch forward pass with sigmoid surrogate backward pass",
+        gradient_flows_to=["selected branch value", "score via surrogate gradient"],
+        recommended_checks=[
+            "compare against soft mode",
+            "hard objective after training",
+            "temperature sensitivity",
+        ],
     )
     return out
 
@@ -225,13 +257,14 @@ def soft_select(
 
     hard_index = max(range(len(score_tensors)), key=lambda i: score_tensors[i].data)
     hard_out = value_tensors[hard_index]
-    out.hard_value = hard_out.data
+    hard_out_value = hard_out.hard_value if hard_out.hard_value is not None else hard_out.data
+    out.hard_value = hard_out_value
 
     tr = current_trace()
     if tr is not None:
         weight_values = [weight.data for weight in weights]
         metrics = FidelityMetrics(
-            hard_value=hard_out.data,
+            hard_value=hard_out_value,
             soft_value=out.data,
             output_gap=scalar_gap(hard_out.data, out.data),
             path_agreement=path_agrees(hard_index, weight_values),
@@ -254,7 +287,7 @@ def soft_select(
             scores=[score.data for score in score_tensors],
             selected_index=hard_index,
             soft_weights=weight_values,
-            output_hard=hard_out.data,
+            output_hard=hard_out_value,
             output_soft=out.data,
             fidelity=metrics,
             relaxation=relaxation,
@@ -270,6 +303,15 @@ def soft_select(
                 "The gradient optimizes the soft expected value, so the learned "
                 "scores must still be evaluated with the original hard argmax."
             ),
+            approximates="hard argmax over candidate scores",
+            gradient_flows_to=["candidate values", "candidate scores", "score parents"],
+            estimator="surrogate",
+            recommended_checks=[
+                "hard argmax objective after training",
+                "path agreement",
+                "candidate entropy",
+                "temperature sensitivity",
+            ],
             fidelity_metrics=metrics,
         )
         tr.record_search(node, ledger)

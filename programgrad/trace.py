@@ -189,5 +189,11 @@ class TraceContext:
             lines.append("gradient ledger:")
             for entry in self.ledger:
                 lines.append(f"  #{entry.id} {entry.surrogate_type}: {entry.gradient_contract}")
+                if entry.approximates:
+                    lines.append(f"     approximates: {entry.approximates}")
+                if entry.gradient_flows_to:
+                    lines.append(f"     gradients: {', '.join(entry.gradient_flows_to)}")
                 lines.append(f"     warning: {entry.bias_warning}")
+                if entry.recommended_checks:
+                    lines.append(f"     checks: {', '.join(entry.recommended_checks)}")
         return "\n".join(lines)

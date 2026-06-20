@@ -19,6 +19,8 @@ class ControlFlowTests(unittest.TestCase):
         self.assertEqual(tr.branches[0].selected_path, "false")
         self.assertIsNotNone(tr.branches[0].fidelity.output_gap)
         self.assertIn("surrogate", tr.gradient_ledger()[0]["bias_warning"])
+        self.assertEqual(tr.gradient_ledger()[0]["estimator"], "surrogate")
+        self.assertIn("hard objective after training", tr.gradient_ledger()[0]["recommended_checks"])
 
     def test_pathwise_diff_if_records_no_soft_gate(self):
         x = Tensor(2.0, requires_grad=True, name="x")
@@ -41,6 +43,7 @@ class ControlFlowTests(unittest.TestCase):
         self.assertEqual(tr.searches[0].selected_index, 1)
         self.assertAlmostEqual(sum(tr.searches[0].soft_weights), 1.0)
         self.assertNotEqual(s0.grad, 0.0)
+        self.assertEqual(tr.gradient_ledger()[0]["approximates"], "hard argmax over candidate scores")
 
     def test_soft_argmax_weights_sum_to_one(self):
         weights = soft_argmax([0.0, 1.0, 2.0], tau=1.0)
@@ -49,4 +52,3 @@ class ControlFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

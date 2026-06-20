@@ -46,3 +46,22 @@ Trace fidelity reports currently include hard-soft output gap, path agreement,
 gate entropy, and temperature. Demos should always evaluate the learned
 parameters with the original hard decision rule, not only the soft loss.
 
+## Semantic ledger
+
+Every relaxed decision writes a ledger entry with:
+
+- the hard operation being approximated;
+- the surrogate or estimator type;
+- where gradients are allowed to flow;
+- the bias warning for the estimator;
+- recommended checks such as gradcheck, hard-vs-soft gap, path agreement, and
+  temperature sensitivity.
+
+This makes the gradient contract inspectable instead of implicit in the code.
+
+## Temperature sensitivity
+
+The same hard program can behave differently as beta or tau changes. ProgramGrad
+therefore includes a lightweight temperature sensitivity report. A strong demo
+should show not only that the soft loss decreased, but also how hard-soft gap,
+entropy, and agreement behave across a small temperature sweep.

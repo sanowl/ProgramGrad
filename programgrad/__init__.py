@@ -5,6 +5,14 @@ explicit control-flow primitives, trace metadata, and fidelity reports.
 """
 
 from .control_flow import bounded_loop, diff_if, soft_argmax, soft_if, soft_select
+from .evaluation import (
+    EvaluationRow,
+    TemperatureSensitivityRow,
+    format_hard_soft_table,
+    format_temperature_table,
+    hard_soft_rows,
+    temperature_sensitivity,
+)
 from .gradcheck import GradcheckResult, gradcheck
 from .tensor import Tensor
 from .trace import TraceContext, trace
@@ -15,10 +23,15 @@ __all__ = [
     "TraceContext",
     "bounded_loop",
     "diff_if",
+    "EvaluationRow",
+    "format_hard_soft_table",
+    "format_temperature_table",
     "gradcheck",
+    "hard_soft_rows",
     "soft_argmax",
     "soft_if",
     "soft_select",
+    "temperature_sensitivity",
+    "TemperatureSensitivityRow",
     "trace",
 ]
-
