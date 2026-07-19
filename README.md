@@ -48,6 +48,9 @@ Or install directly from GitHub:
 python -m pip install "git+https://github.com/sanowl/ProgramGrad.git"
 ```
 
+A manual GitHub Actions workflow (`.github/workflows/publish.yml`) is ready for
+Trusted Publishing to PyPI when you want the first public upload. See
+[CHANGELOG.md](CHANGELOG.md) for the alpha release notes.
 ## Example
 
 ```python
@@ -120,7 +123,8 @@ compiler lowering. ProgramGrad targets a narrower gap: making the gradient of an
 algorithmic decision understandable.
 
 For deeper details, see [semantics](docs/semantics.md),
-[evaluation reports](docs/evaluation.md), and [limitations](docs/limitations.md).
+[evaluation reports](docs/evaluation.md), [limitations](docs/limitations.md),
+and the [changelog](CHANGELOG.md).
 
 The public thesis is:
 

@@ -9,23 +9,36 @@ description = "A research-oriented scalar framework for differentiable program t
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "ProgramGrad contributors" }]
-license = { text = "MIT" }
-keywords = ["autograd", "differentiable-programming", "program-traces", "surrogate-gradients"]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+  "autograd",
+  "differentiable-programming",
+  "program-traces",
+  "surrogate-gradients",
+  "hard-soft-fidelity",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
 ]
 
 [project.urls]
 Homepage = "https://github.com/sanowl/ProgramGrad"
 Repository = "https://github.com/sanowl/ProgramGrad"
 Issues = "https://github.com/sanowl/ProgramGrad/issues"
+Changelog = "https://github.com/sanowl/ProgramGrad/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = ["build", "twine"]
 
 [tool.setuptools.packages.find]
 include = ["programgrad*"]
