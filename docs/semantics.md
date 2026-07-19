@@ -40,6 +40,28 @@ branch values and through the gate score.
 `straight_through` uses a hard forward decision and a soft backward gate. It is
 reported as a biased estimator in the ledger.
 
+## Selection relaxations
+
+`soft_select` supports three surrogate modes:
+
+- `softmax`: expected value under softmax weights
+- `gumbel`: Concrete / Gumbel-Softmax mixture (optional `seed` for reproducibility)
+- `gumbel_st`: hard Gumbel sample forward with Concrete backward (straight-through)
+
+In all modes the traced hard program remains argmax over hard scores. Soft
+weights are what training sees.
+
+## Hybrid training objective
+
+`hybrid_loss(result, target, gap_weight=1.0)` optimizes
+
+```text
+L = (soft - target)^2 + gap_weight * (soft - hard)^2
+```
+
+so the soft surrogate is pulled toward both the task target and the hard-program
+value. Use `hard_squared_loss` to report the hard objective without gradients.
+
 ## Nested decisions
 
 Every relaxed control-flow output carries its original hard-program value as a
@@ -56,12 +78,16 @@ omitted from `hard_path` / hard-vs-soft evaluation rows.
 ## Bounded loops
 
 `bounded_loop` validates a finite positive gate temperature and a non-negative
-integer step bound. It unrolls the soft survival-gate surrogate for the full
-bound while separately retaining the state at which the original hard loop
-stopped. Once the carried state has a hard shadow, the body must keep returning
-`Tensor` values that preserve `hard_value` (do not escape through `.data`).
-This is still a controlled relaxation rather than general Python loop
-differentiation.
+integer step bound. Two soft modes are available:
+
+- `survival` (default): soft state is carried by a running survival gate
+- `exit_distribution`: soft output is the expectation under the discrete exit
+  mass over step candidates, while bodies still see survival-carried soft state
+
+Hard early-stop tracking is shared by both modes. Once the carried state has a
+hard shadow, the body must keep returning `Tensor` values that preserve
+`hard_value` (do not escape through `.data`). This is still a controlled
+relaxation rather than general Python loop differentiation.
 Loop frames expose hard continue/stop decisions and hard/soft carried state in
 JSON, text, hard-path, and SVG trace views.
 

@@ -305,6 +305,65 @@ class ControlFlowTests(unittest.TestCase):
                 lambda _i, _state: math.nan,
             )
 
+    def test_soft_select_gumbel_modes_keep_hard_argmax(self):
+        with trace(mode="dual", fidelity=True, record_ops=False) as tr:
+            soft = soft_select(
+                [1.0, 5.0],
+                [0.0, 2.0],
+                tau=0.5,
+                mode="gumbel",
+                seed=7,
+                candidate_names=["a", "b"],
+            )
+            ste = soft_select(
+                [1.0, 5.0],
+                [0.0, 2.0],
+                tau=0.5,
+                mode="gumbel_st",
+                seed=7,
+                candidate_names=["a", "b"],
+            )
+
+        self.assertAlmostEqual(soft.hard_value, 5.0)
+        self.assertAlmostEqual(ste.hard_value, 5.0)
+        self.assertEqual(tr.searches[0].selected_index, 1)
+        self.assertEqual(tr.searches[0].relaxation.surrogate_type, "gumbel_softmax_select")
+        self.assertEqual(
+            tr.searches[1].relaxation.surrogate_type,
+            "gumbel_straight_through_select",
+        )
+        self.assertAlmostEqual(sum(tr.searches[0].soft_weights), 1.0)
+        # Straight-through forward is a hard one-hot sample of a candidate value.
+        self.assertIn(ste.data, (1.0, 5.0))
+        ste.zero_grad()
+        score = Tensor(0.0, requires_grad=True)
+        out = soft_select([1.0, 5.0], [score, 2.0], mode="gumbel_st", seed=3, tau=0.7)
+        (out - 5.0).backward()
+        self.assertNotEqual(score.grad, 0.0)
+
+    def test_soft_select_rejects_unknown_mode(self):
+        with self.assertRaisesRegex(ValueError, "mode must be one of"):
+            soft_select([1.0], [0.0], mode="nope")
+
+    def test_bounded_loop_exit_distribution_mixtures_candidates(self):
+        with trace(mode="dual", fidelity=False, record_ops=False) as tr:
+            result = bounded_loop(
+                0.0,
+                2,
+                lambda _index, state: state + 1.0,
+                lambda _index, _state: 0.0,
+                beta=1.0,
+                mode="exit_distribution",
+            )
+
+        # continue gate at score 0 is 0.5, so exit masses are 0.5 then 0.5
+        # candidates are 1 then soft-carried next body sees mixed state.
+        self.assertAlmostEqual(result.hard_value, 0.0)
+        self.assertGreater(result.data, 0.0)
+        self.assertEqual(len(tr.loops), 2)
+        with self.assertRaisesRegex(ValueError, "mode must be one of"):
+            bounded_loop(0.0, 0, lambda _i, state: state, lambda _i, _state: 1.0, mode="nope")
+
 
 if __name__ == "__main__":
     unittest.main()

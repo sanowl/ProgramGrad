@@ -12,6 +12,9 @@ ProgramGrad v0.1 alpha is intentionally narrow.
 - Soft branch and bounded-loop bodies are evaluated to build the surrogate even
   when the original hard program would not execute them, so those relaxed paths
   must still be valid on their soft inputs.
+- Gumbel selection modes are stochastic unless a `seed` is provided.
+- `exit_distribution` loops still evaluate bodies under a survival-carried soft
+  state; only the returned soft value uses the discrete exit mixture.
 - Hard-shadow arithmetic can diverge from the soft domain; the soft forward
   continues and the tensor keeps a deferred hard error. Later hard decisions
   that call `hard_data` raise instead of silently substituting the soft value.

@@ -21,6 +21,9 @@ argmax choices, thresholds, and reasoning/search programs.
 - Finite-difference `gradcheck`.
 - Trace IR for ops, branches, searches, loop frames, and semantic ledger entries.
 - `soft_if`, `diff_if`, `soft_argmax`, `soft_select`, and bounded loop relaxation.
+- Selection modes: softmax, Gumbel-Softmax, and Gumbel straight-through.
+- Hybrid soft+hard-gap training loss (`hybrid_loss`).
+- Loop soft modes: survival gates and exit-mass mixtures.
 - Hard-shadow propagation through nested arithmetic and discrete decisions.
 - Hard-soft fidelity reports: output gap, path agreement, entropy, temperature.
 - Hard-vs-soft evaluation tables and temperature sensitivity reports.

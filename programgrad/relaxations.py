@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import random
+from collections.abc import Sequence
 
 from .ops import tensor_sum
 from .tensor import Tensor, ensure_tensor, hard_data
@@ -75,3 +77,50 @@ def softmax(scores: list[Tensor | float], tau: float = 1.0) -> list[Tensor]:
     exps = [((score - offset) / tau).exp() for score in score_tensors]
     denom = tensor_sum(exps)
     return [value / denom for value in exps]
+
+
+def _gumbel_noise(count: int, *, seed: int | None) -> list[float]:
+    rng = random.Random(seed)
+    noises: list[float] = []
+    for _ in range(count):
+        # Inverse-CDF Gumbel(0, 1): -log(-log(U)), with U in (0, 1).
+        u = rng.random()
+        u = min(max(u, 1e-12), 1.0 - 1e-12)
+        noises.append(-math.log(-math.log(u)))
+    return noises
+
+
+def gumbel_softmax(
+    scores: Sequence[Tensor | float],
+    *,
+    tau: float = 1.0,
+    seed: int | None = None,
+) -> list[Tensor]:
+    """Concrete / Gumbel-Softmax relaxation over candidate scores."""
+
+    score_tensors = [ensure_tensor(score) for score in scores]
+    if not score_tensors:
+        raise ValueError("gumbel_softmax requires at least one score")
+    noises = _gumbel_noise(len(score_tensors), seed=seed)
+    perturbed = [score + noise for score, noise in zip(score_tensors, noises)]
+    return softmax(perturbed, tau=tau)
+
+
+def gumbel_softmax_straight_through(
+    scores: Sequence[Tensor | float],
+    *,
+    tau: float = 1.0,
+    seed: int | None = None,
+) -> tuple[list[Tensor], list[Tensor], int]:
+    """Hard Gumbel sample forward with soft Concrete backward.
+
+    Returns ``(ste_weights, soft_weights, sampled_index)``.
+    """
+
+    soft_weights = gumbel_softmax(scores, tau=tau, seed=seed)
+    sampled_index = max(range(len(soft_weights)), key=lambda idx: soft_weights[idx].data)
+    ste_weights: list[Tensor] = []
+    for index, soft in enumerate(soft_weights):
+        hard = Tensor(1.0 if index == sampled_index else 0.0)
+        ste_weights.append(hard + (soft - soft.detach()))
+    return ste_weights, soft_weights, sampled_index

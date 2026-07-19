@@ -5,6 +5,14 @@ All notable changes to ProgramGrad are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [PEP 440](https://peps.python.org/pep-0440/) versioning.
 
+## [Unreleased]
+
+### Added
+
+- `soft_select(..., mode="gumbel"|"gumbel_st")` Concrete / straight-through Gumbel selection
+- `bounded_loop(..., mode="exit_distribution")` soft exit-mass mixture over step candidates
+- `hybrid_loss` and `hard_squared_loss` for soft training with hard-gap regularization
+
 ## [0.1.0a0] - 2026-07-19
 
 First public alpha of ProgramGrad: a scalar research lab for hard program

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from .fidelity import scalar_gap, summarize_final_loop
 from .relaxations import validate_temperature
-from .tensor import Tensor
+from .tensor import Tensor, ensure_tensor, hard_data
 
 if TYPE_CHECKING:  # pragma: no cover
     from .ir import FidelityMetrics
@@ -54,6 +54,41 @@ class TemperatureSensitivityRow:
 
 def squared_loss(value: float, target: float) -> float:
     return (float(value) - float(target)) ** 2
+
+
+def hard_squared_loss(result: Tensor, target: float) -> float:
+    """Evaluate the hard program value against a target (no gradients)."""
+
+    return squared_loss(hard_data(result), target)
+
+
+def hybrid_loss(
+    result: Tensor,
+    target: float | Tensor,
+    *,
+    gap_weight: float = 1.0,
+) -> Tensor:
+    """Soft squared loss plus a penalty that pulls soft toward hard.
+
+    ``L = (soft - target)^2 + gap_weight * (soft - hard)^2``
+
+    The hard value is treated as a constant target for the gap term, so
+    gradients still flow through the soft surrogate while encouraging fidelity.
+    """
+
+    if isinstance(gap_weight, bool) or not isinstance(gap_weight, (int, float)):
+        raise TypeError("gap_weight must be a number")
+    weight = float(gap_weight)
+    if not math.isfinite(weight) or weight < 0.0:
+        raise ValueError("gap_weight must be a finite non-negative number")
+
+    target_t = ensure_tensor(target)
+    soft_term = (result - target_t) ** 2
+    if weight == 0.0:
+        return soft_term
+    hard_constant = Tensor(hard_data(result))
+    gap_term = (result - hard_constant) ** 2
+    return soft_term + weight * gap_term
 
 
 def _fmt(value: object) -> str:

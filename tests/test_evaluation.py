@@ -6,6 +6,8 @@ from programgrad import (
     format_hard_soft_table,
     format_temperature_table,
     hard_soft_rows,
+    hard_squared_loss,
+    hybrid_loss,
     soft_if,
     soft_select,
     temperature_sensitivity,
@@ -140,6 +142,17 @@ class EvaluationTests(unittest.TestCase):
         )
         table = format_hard_soft_table([row])
         self.assertIn("branch\\|name<br>next", table)
+
+    def test_hybrid_loss_pulls_soft_toward_hard_and_target(self):
+        value = Tensor(0.0, requires_grad=True)
+        value.hard_value = 2.0
+        loss = hybrid_loss(value, target=2.0, gap_weight=1.0)
+        loss.backward()
+        self.assertAlmostEqual(loss.data, 8.0)  # (0-2)^2 + (0-2)^2
+        self.assertLess(value.grad, 0.0)
+        self.assertAlmostEqual(hard_squared_loss(value, 2.0), 0.0)
+        with self.assertRaisesRegex(ValueError, "gap_weight"):
+            hybrid_loss(value, 1.0, gap_weight=-1.0)
 
 
 if __name__ == "__main__":

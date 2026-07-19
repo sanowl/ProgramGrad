@@ -11,6 +11,8 @@ from .evaluation import (
     format_hard_soft_table,
     format_temperature_table,
     hard_soft_rows,
+    hard_squared_loss,
+    hybrid_loss,
     temperature_sensitivity,
 )
 from .gradcheck import GradcheckResult, gradcheck
@@ -29,6 +31,8 @@ __all__ = [
     "gradcheck",
     "hard_data",
     "hard_soft_rows",
+    "hard_squared_loss",
+    "hybrid_loss",
     "soft_argmax",
     "soft_if",
     "soft_only_region",

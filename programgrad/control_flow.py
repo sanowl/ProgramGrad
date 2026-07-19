@@ -8,7 +8,14 @@ from operator import index as integer_index
 
 from .fidelity import binary_entropy, categorical_entropy, path_agrees, scalar_gap
 from .ir import BranchNode, ConditionNode, FidelityMetrics, LedgerEntry, LoopFrame, RelaxationSpec, SearchNode
-from .relaxations import sigmoid_gate, softmax, straight_through_gates, validate_temperature
+from .relaxations import (
+    gumbel_softmax,
+    gumbel_softmax_straight_through,
+    sigmoid_gate,
+    softmax,
+    straight_through_gates,
+    validate_temperature,
+)
 from .tensor import Tensor, ensure_tensor, hard_data
 from .trace import current_trace, in_soft_only, soft_only_region
 
@@ -151,6 +158,17 @@ def _record_search(
     output_hard: float,
     output_soft: float,
     tau: float,
+    surrogate_type: str = "softmax_select",
+    estimator: str = "surrogate",
+    notes: str = "Hard argmax is paired with softmax-weighted candidate values.",
+    gradient_contract: str = (
+        "Forward surrogate is the softmax-weighted expected value; "
+        "gradients flow into candidate values and selection scores."
+    ),
+    bias_warning: str = (
+        "The gradient optimizes the soft expected value, so the learned "
+        "scores must still be evaluated with the original hard argmax."
+    ),
 ) -> None:
     tr = current_trace()
     if tr is None:
@@ -177,28 +195,22 @@ def _record_search(
         output_soft=output_soft,
         fidelity=metrics,
         relaxation=RelaxationSpec(
-            surrogate_type="softmax_select",
+            surrogate_type=surrogate_type,
             temperature=tau,
-            estimator="surrogate",
-            notes="Hard argmax is paired with softmax-weighted candidate values.",
+            estimator=estimator,
+            notes=notes,
         ),
         soft_scores=soft_scores,
         on_hard_path=not in_soft_only(),
     )
     ledger = LedgerEntry(
         id=event_id,
-        surrogate_type="softmax_select",
-        gradient_contract=(
-            "Forward surrogate is the softmax-weighted expected value; "
-            "gradients flow into candidate values and selection scores."
-        ),
-        bias_warning=(
-            "The gradient optimizes the soft expected value, so the learned "
-            "scores must still be evaluated with the original hard argmax."
-        ),
+        surrogate_type=surrogate_type,
+        gradient_contract=gradient_contract,
+        bias_warning=bias_warning,
         approximates="hard argmax over candidate scores",
         gradient_flows_to=["candidate values", "candidate scores", "score parents"],
-        estimator="surrogate",
+        estimator=estimator,
         recommended_checks=[
             "hard argmax objective after training",
             "path agreement",
@@ -361,10 +373,20 @@ def soft_select(
     scores: Sequence[Tensor | float],
     *,
     tau: float = 1.0,
+    mode: str = "softmax",
+    seed: int | None = None,
     candidate_names: Sequence[str] | None = None,
 ) -> Tensor:
-    """Select among values with a hard argmax trace and softmax surrogate."""
+    """Select among values with a hard argmax trace and a soft surrogate.
 
+    Modes:
+      - ``softmax``: expected value under softmax weights
+      - ``gumbel``: Concrete / Gumbel-Softmax expected value
+      - ``gumbel_st``: hard Gumbel sample forward, soft Concrete backward
+    """
+
+    if mode not in {"softmax", "gumbel", "gumbel_st"}:
+        raise ValueError("mode must be one of: softmax, gumbel, gumbel_st")
     if len(values) != len(scores):
         raise ValueError("values and scores must have the same length")
     if not values:
@@ -382,9 +404,57 @@ def soft_select(
 
     value_tensors = [ensure_tensor(value) for value in values]
     score_tensors = [ensure_tensor(score) for score in scores]
-    weights = softmax(score_tensors, tau=tau)
+    if mode == "softmax":
+        mix_weights = softmax(score_tensors, tau=tau)
+        report_weights = mix_weights
+        surrogate_type = "softmax_select"
+        estimator = "surrogate"
+        notes = "Hard argmax is paired with softmax-weighted candidate values."
+        gradient_contract = (
+            "Forward surrogate is the softmax-weighted expected value; "
+            "gradients flow into candidate values and selection scores."
+        )
+        bias_warning = (
+            "The gradient optimizes the soft expected value, so the learned "
+            "scores must still be evaluated with the original hard argmax."
+        )
+    elif mode == "gumbel":
+        mix_weights = gumbel_softmax(score_tensors, tau=tau, seed=seed)
+        report_weights = mix_weights
+        surrogate_type = "gumbel_softmax_select"
+        estimator = "surrogate"
+        notes = "Hard argmax is paired with a Concrete / Gumbel-Softmax mixture."
+        gradient_contract = (
+            "Forward surrogate is the Gumbel-Softmax expected value; "
+            "gradients flow into candidate values and selection scores."
+        )
+        bias_warning = (
+            "Gumbel-Softmax optimizes a noisy Concrete relaxation; evaluate the "
+            "learned scores with the original hard argmax."
+        )
+    else:
+        mix_weights, report_weights, _sampled = gumbel_softmax_straight_through(
+            score_tensors,
+            tau=tau,
+            seed=seed,
+        )
+        surrogate_type = "gumbel_straight_through_select"
+        estimator = "hard-forward-soft-backward"
+        notes = (
+            "Hard program argmax is traced separately from the Gumbel sample used "
+            "in the straight-through forward pass."
+        )
+        gradient_contract = (
+            "Forward pass uses a hard Gumbel sample; backward pass uses the "
+            "Concrete / Gumbel-Softmax surrogate gradient."
+        )
+        bias_warning = (
+            "Straight-through Gumbel gradients are biased estimators; always "
+            "check the hard argmax objective after training."
+        )
+
     out = Tensor(0.0)
-    for weight, value in zip(weights, value_tensors):
+    for weight, value in zip(mix_weights, value_tensors):
         out = out + weight * value
 
     hard_scores = [hard_data(score) for score in score_tensors]
@@ -395,10 +465,15 @@ def soft_select(
         hard_scores=hard_scores,
         soft_scores=[score.data for score in score_tensors],
         hard_index=hard_index,
-        soft_weights=[weight.data for weight in weights],
+        soft_weights=[weight.data for weight in report_weights],
         output_hard=hard_out_value,
         output_soft=out.data,
         tau=tau,
+        surrogate_type=surrogate_type,
+        estimator=estimator,
+        notes=notes,
+        gradient_contract=gradient_contract,
+        bias_warning=bias_warning,
     )
     return out
 
@@ -426,8 +501,15 @@ def bounded_loop(
     continue_score_fn: Callable[[int, Tensor], Tensor | float],
     *,
     beta: float = 10.0,
+    mode: str = "survival",
 ) -> Tensor:
-    """Bounded early-exit relaxation using survival gates.
+    """Bounded early-exit relaxation.
+
+    Modes:
+      - ``survival``: soft state is carried by a running survival gate
+      - ``exit_distribution``: soft output is the expectation under the discrete
+        exit-mass distribution over step candidates, while bodies still see a
+        survival-carried soft state
 
     This is intentionally limited: it relaxes a fixed maximum number of steps
     rather than claiming support for arbitrary data-dependent Python loops.
@@ -435,6 +517,8 @@ def bounded_loop(
     that preserves ``hard_value`` (use Tensor ops; do not escape via ``.data``).
     """
 
+    if mode not in {"survival", "exit_distribution"}:
+        raise ValueError("mode must be one of: survival, exit_distribution")
     if isinstance(steps, bool):
         raise TypeError("steps must be an integer, not bool")
     try:
@@ -447,6 +531,8 @@ def bounded_loop(
 
     state = ensure_tensor(init_state)
     alive = Tensor(1.0)
+    survival = Tensor(1.0)
+    soft_out = Tensor(0.0)
     hard_state = hard_data(state)
     hard_alive = True
     tr = current_trace()
@@ -477,6 +563,14 @@ def bounded_loop(
             else:
                 hard_alive = False
 
+        if mode == "exit_distribution":
+            if index < step_count - 1:
+                exit_mass = survival * (1.0 - gate)
+                survival = survival * gate
+            else:
+                exit_mass = survival
+            soft_out = soft_out + exit_mass * candidate
+
         alive = alive * gate
         state = alive * candidate + (1.0 - alive) * state
         # Do not execute hard metadata through later bodies after the original
@@ -500,5 +594,14 @@ def bounded_loop(
                     on_hard_path=decision_on_hard_path,
                 )
             )
+
+    if mode == "exit_distribution":
+        if step_count == 0:
+            result = state
+        else:
+            result = soft_out
+        _attach_hard(result, hard_state)
+        return result
+
     _attach_hard(state, hard_state)
     return state

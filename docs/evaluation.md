@@ -54,8 +54,11 @@ credit assignment, but it may indicate a weak approximation of the hard program.
 The recommended workflow is:
 
 1. Validate gradients on the surrogate with `gradcheck`.
-2. Train using the surrogate.
-3. Report hard-vs-soft evaluation on the final trace.
+2. Train using the soft surrogate (`soft_if`, `soft_select`, or `hybrid_loss`).
+3. Report hard-vs-soft evaluation / path agreement on the final trace.
 4. Sweep temperature to show whether the conclusion is stable.
-5. Evaluate the final parameters with the original hard program.
+5. Evaluate the final parameters with `hard_squared_loss` / the original hard program.
+
+`hybrid_loss(result, target, gap_weight=...)` pulls the soft surrogate toward both
+the task target and the hard-program value when you want fidelity during training.
 
