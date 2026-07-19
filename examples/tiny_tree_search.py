@@ -17,14 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from programgrad import (
+from programgrad import (  # noqa: E402
     Tensor,
+    TraceContext,
     format_hard_soft_table,
     format_temperature_table,
+    hard_data,
     hard_soft_rows,
+    soft_only_region,
     soft_select,
     temperature_sensitivity,
     trace,
+    training_mode,
 )
 
 TARGET = 3.2
@@ -80,8 +84,15 @@ def soft_tree_value(node: Node, theta: list[Tensor], *, tau: float = 0.65) -> Te
         assert node.value is not None
         return Tensor(node.value, name=node.name)
 
-    values = [soft_tree_value(child, theta, tau=tau) for child in node.children]
     scores = [score(child, theta) for child in node.children]
+    hard_index = max(range(len(scores)), key=lambda idx: hard_data(scores[idx]))
+    values: list[Tensor] = []
+    for index, child in enumerate(node.children):
+        if index == hard_index:
+            values.append(soft_tree_value(child, theta, tau=tau))
+        else:
+            with soft_only_region():
+                values.append(soft_tree_value(child, theta, tau=tau))
     return soft_select(
         values,
         scores,
@@ -94,40 +105,34 @@ def hard_tree_value(node: Node, theta: list[Tensor]) -> float:
     if node.is_leaf:
         assert node.value is not None
         return node.value
-    selected = max(node.children, key=lambda child: score(child, theta).data)
+    selected = max(node.children, key=lambda child: hard_data(score(child, theta)))
     return hard_tree_value(selected, theta)
 
 
-def train(steps: int = 80, lr: float = 0.05) -> tuple[list[Tensor], object]:
+def train(steps: int = 80, lr: float = 0.05) -> tuple[list[Tensor], TraceContext]:
     theta = [
         Tensor(0.1, requires_grad=True, name="theta_a"),
         Tensor(0.1, requires_grad=True, name="theta_b"),
         Tensor(0.1, requires_grad=True, name="theta_cost"),
     ]
     target = Tensor(TARGET, name="target")
-    final_trace = None
-
-    for step in range(steps):
-        ctx = trace(mode="dual", relaxation="softmax_select", fidelity=True) if step == steps - 1 else None
-        if ctx is None:
+    with training_mode(hard_shadow=False):
+        for _ in range(steps):
             y = soft_tree_value(TREE, theta)
             loss = (y - target) ** 2
             loss.backward()
-        else:
-            with ctx as tr:
-                y = soft_tree_value(TREE, theta)
-                loss = (y - target) ** 2
-                loss.backward()
-            final_trace = tr
+            for param in theta:
+                param.data -= lr * param.grad
 
-        for param in theta:
-            param.data -= lr * param.grad
-
-    assert final_trace is not None
+    # Re-evaluate after the final update so trace scores match returned theta.
+    with trace(mode="dual", relaxation="softmax_select", fidelity=True) as final_trace:
+        y = soft_tree_value(TREE, theta)
+        loss = (y - target) ** 2
+        loss.backward()
     return theta, final_trace
 
 
-def run_tree_once(theta_values: list[float], tau: float) -> tuple[Tensor, object]:
+def run_tree_once(theta_values: list[float], tau: float) -> tuple[Tensor, TraceContext]:
     theta = [
         Tensor(theta_values[0], requires_grad=True, name="theta_a"),
         Tensor(theta_values[1], requires_grad=True, name="theta_b"),

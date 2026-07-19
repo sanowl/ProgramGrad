@@ -24,6 +24,10 @@ The table reports:
 - entropy: uncertainty in the branch gate or candidate distribution;
 - hard/soft loss: squared loss against the target when a target is provided.
 
+With `fidelity=False`, hard/soft values still come from the structural branch,
+search, and final loop nodes; gap, agreement, entropy, and temperature are left
+blank.
+
 ## Temperature sensitivity
 
 Temperature controls the optimization/fidelity tradeoff. For branches, beta

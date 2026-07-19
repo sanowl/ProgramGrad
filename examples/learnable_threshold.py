@@ -13,48 +13,46 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from programgrad import (
+from programgrad import (  # noqa: E402
     Tensor,
+    TraceContext,
     format_hard_soft_table,
     format_temperature_table,
     hard_soft_rows,
     soft_if,
     temperature_sensitivity,
     trace,
+    training_mode,
 )
 
 TARGET = 1.4
 X_VALUE = 0.7
 
 
-def train(steps: int = 60, lr: float = 0.08, beta: float = 6.0) -> tuple[Tensor, object]:
+def train(steps: int = 60, lr: float = 0.08, beta: float = 6.0) -> tuple[Tensor, TraceContext]:
     x = Tensor(X_VALUE, name="x")
     threshold = Tensor(1.35, requires_grad=True, name="threshold")
     target = Tensor(TARGET, name="target")
-    final_trace = None
 
-    for step in range(steps):
-        ctx = trace(mode="dual", relaxation="soft_gate", fidelity=True) if step == steps - 1 else None
-        if ctx is None:
+    with training_mode(hard_shadow=False):
+        for _ in range(steps):
             score = x - threshold
             y = soft_if(score, true_value=2.0 * x, false_value=x**2, beta=beta)
             loss = (y - target) ** 2
             loss.backward()
-        else:
-            with ctx as tr:
-                score = x - threshold
-                y = soft_if(score, true_value=2.0 * x, false_value=x**2, beta=beta)
-                loss = (y - target) ** 2
-                loss.backward()
-            final_trace = tr
+            threshold.data -= lr * threshold.grad
 
-        threshold.data -= lr * threshold.grad
-
-    assert final_trace is not None
+    # Re-evaluate after the final update so the returned trace and parameters
+    # describe the same program state.
+    with trace(mode="dual", relaxation="soft_gate", fidelity=True) as final_trace:
+        score = x - threshold
+        y = soft_if(score, true_value=2.0 * x, false_value=x**2, beta=beta)
+        loss = (y - target) ** 2
+        loss.backward()
     return threshold, final_trace
 
 
-def run_threshold_once(threshold_value: float, beta: float) -> tuple[Tensor, object]:
+def run_threshold_once(threshold_value: float, beta: float) -> tuple[Tensor, TraceContext]:
     x = Tensor(X_VALUE, name="x")
     threshold = Tensor(threshold_value, requires_grad=True, name="threshold")
     with trace(mode="dual", relaxation="soft_gate", fidelity=True, record_ops=False) as tr:

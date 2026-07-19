@@ -28,8 +28,14 @@ def relu(x: Tensor | float) -> Tensor:
 
 
 def tensor_sum(values: Iterable[Tensor | float]) -> Tensor:
-    total = Tensor(0.0)
-    for value in values:
+    """Sum tensors without a useless ``0 + x`` leaf in the graph."""
+
+    iterator = iter(values)
+    try:
+        total = ensure_tensor(next(iterator))
+    except StopIteration:
+        return Tensor(0.0)
+    for value in iterator:
         total = total + ensure_tensor(value)
     return total
 

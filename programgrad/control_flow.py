@@ -2,27 +2,75 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
-from typing import TypeVar
+from operator import index as integer_index
 
 from .fidelity import binary_entropy, categorical_entropy, path_agrees, scalar_gap
 from .ir import BranchNode, ConditionNode, FidelityMetrics, LedgerEntry, LoopFrame, RelaxationSpec, SearchNode
-from .relaxations import sigmoid_gate, softmax, straight_through_gate
-from .tensor import Tensor, ensure_tensor
-from .trace import current_trace
+from .relaxations import sigmoid_gate, softmax, straight_through_gates, validate_temperature
+from .tensor import Tensor, ensure_tensor, hard_data
+from .trace import current_trace, in_soft_only, soft_only_region
 
-T = TypeVar("T")
+BranchValue = Tensor | float | Callable[[], Tensor | float]
 
 
-def _value(value: Tensor | float | Callable[[], Tensor | float]) -> Tensor:
+def _resolve_branch_value(value: BranchValue) -> Tensor:
     if callable(value):
         value = value()
     return ensure_tensor(value)
 
 
+def _evaluate_both_branches(
+    hard_true: bool,
+    true_value: BranchValue,
+    false_value: BranchValue,
+) -> tuple[Tensor, Tensor]:
+    """Evaluate both sides; mark the unselected side as soft-only."""
+
+    if hard_true:
+        true_t = _resolve_branch_value(true_value)
+        with soft_only_region():
+            false_t = _resolve_branch_value(false_value)
+    else:
+        with soft_only_region():
+            true_t = _resolve_branch_value(true_value)
+        false_t = _resolve_branch_value(false_value)
+    return true_t, false_t
+
+
+def _attach_hard(output: Tensor, hard_value: float) -> float:
+    """Attach a concrete hard-program value, clearing any deferred hard error."""
+
+    from .trace import hard_shadow_enabled
+
+    if not hard_shadow_enabled():
+        return hard_value
+    output.hard_value = hard_value
+    output.hard_error = None
+    return hard_value
+
+
+def _require_finite_score(
+    score: Tensor,
+    *,
+    name: str = "score",
+    require_hard: bool = True,
+) -> float:
+    """Validate score finiteness and return the hard score used for decisions."""
+
+    if not math.isfinite(score.data):
+        raise ValueError(f"{name} must be finite")
+    hard_score = hard_data(score) if require_hard else score.data
+    if require_hard and not math.isfinite(hard_score):
+        raise ValueError(f"{name} hard value must be finite")
+    return hard_score
+
+
 def _record_branch(
     *,
     score: Tensor,
+    hard_score: float,
     selected_path: str,
     output_hard: float,
     output_soft: float | None,
@@ -40,17 +88,19 @@ def _record_branch(
     if tr is None:
         return
 
-    path_agreement = None
-    if gate is not None:
-        path_agreement = (gate >= 0.5) == (selected_path == "true")
-    metrics = FidelityMetrics(
-        hard_value=output_hard,
-        soft_value=output_soft,
-        output_gap=scalar_gap(output_hard, output_soft),
-        path_agreement=path_agreement,
-        gate_entropy=binary_entropy(gate),
-        temperature=beta,
-    )
+    metrics = None
+    if tr.fidelity:
+        path_agreement = None
+        if gate is not None:
+            path_agreement = (gate >= 0.5) == (selected_path == "true")
+        metrics = FidelityMetrics(
+            hard_value=output_hard,
+            soft_value=output_soft,
+            output_gap=scalar_gap(output_hard, output_soft),
+            path_agreement=path_agreement,
+            gate_entropy=binary_entropy(gate),
+            temperature=beta,
+        )
     relaxation = RelaxationSpec(
         surrogate_type=surrogate_type,
         temperature=beta,
@@ -58,13 +108,14 @@ def _record_branch(
         notes=bias_warning,
     )
     condition = ConditionNode(
-        score=score.data,
+        score=hard_score,
         comparator="> 0",
-        hard_value=score.data > 0.0,
+        hard_value=hard_score > 0.0,
         gate=gate,
         relaxation=relaxation,
         temperature=beta,
         gradient_contract=gradient_contract,
+        soft_score=score.data,
     )
     event_id = tr.next_id()
     branch = BranchNode(
@@ -74,6 +125,7 @@ def _record_branch(
         output_hard=output_hard,
         output_soft=output_soft,
         fidelity=metrics,
+        on_hard_path=not in_soft_only(),
     )
     ledger = LedgerEntry(
         id=event_id,
@@ -89,10 +141,79 @@ def _record_branch(
     tr.record_branch(branch, ledger)
 
 
+def _record_search(
+    *,
+    names: list[str],
+    hard_scores: list[float],
+    soft_scores: list[float],
+    hard_index: int,
+    soft_weights: list[float],
+    output_hard: float,
+    output_soft: float,
+    tau: float,
+) -> None:
+    tr = current_trace()
+    if tr is None:
+        return
+
+    metrics = None
+    if tr.fidelity:
+        metrics = FidelityMetrics(
+            hard_value=output_hard,
+            soft_value=output_soft,
+            output_gap=scalar_gap(output_hard, output_soft),
+            path_agreement=path_agrees(hard_index, soft_weights),
+            gate_entropy=categorical_entropy(soft_weights),
+            temperature=tau,
+        )
+    event_id = tr.next_id()
+    node = SearchNode(
+        id=event_id,
+        candidates=names,
+        scores=hard_scores,
+        selected_index=hard_index,
+        soft_weights=soft_weights,
+        output_hard=output_hard,
+        output_soft=output_soft,
+        fidelity=metrics,
+        relaxation=RelaxationSpec(
+            surrogate_type="softmax_select",
+            temperature=tau,
+            estimator="surrogate",
+            notes="Hard argmax is paired with softmax-weighted candidate values.",
+        ),
+        soft_scores=soft_scores,
+        on_hard_path=not in_soft_only(),
+    )
+    ledger = LedgerEntry(
+        id=event_id,
+        surrogate_type="softmax_select",
+        gradient_contract=(
+            "Forward surrogate is the softmax-weighted expected value; "
+            "gradients flow into candidate values and selection scores."
+        ),
+        bias_warning=(
+            "The gradient optimizes the soft expected value, so the learned "
+            "scores must still be evaluated with the original hard argmax."
+        ),
+        approximates="hard argmax over candidate scores",
+        gradient_flows_to=["candidate values", "candidate scores", "score parents"],
+        estimator="surrogate",
+        recommended_checks=[
+            "hard argmax objective after training",
+            "path agreement",
+            "candidate entropy",
+            "temperature sensitivity",
+        ],
+        fidelity_metrics=metrics,
+    )
+    tr.record_search(node, ledger)
+
+
 def soft_if(
     score: Tensor | float,
-    true_value: Tensor | float | Callable[[], Tensor | float],
-    false_value: Tensor | float | Callable[[], Tensor | float],
+    true_value: BranchValue,
+    false_value: BranchValue,
     *,
     beta: float = 10.0,
 ) -> Tensor:
@@ -104,17 +225,18 @@ def soft_if(
     """
 
     score_t = ensure_tensor(score)
-    true_t = _value(true_value)
-    false_t = _value(false_value)
+    beta = validate_temperature(beta, name="beta")
+    hard_score = _require_finite_score(score_t)
+    hard_true = hard_score > 0.0
+    true_t, false_t = _evaluate_both_branches(hard_true, true_value, false_value)
     gate = sigmoid_gate(score_t, beta=beta)
     out = gate * true_t + (1.0 - gate) * false_t
 
-    hard_true = score_t.data > 0.0
     hard_out = true_t if hard_true else false_t
-    hard_out_value = hard_out.hard_value if hard_out.hard_value is not None else hard_out.data
-    out.hard_value = hard_out_value
+    hard_out_value = _attach_hard(out, hard_data(hard_out))
     _record_branch(
         score=score_t,
+        hard_score=hard_score,
         selected_path="true" if hard_true else "false",
         output_hard=hard_out_value,
         output_soft=out.data,
@@ -158,15 +280,19 @@ def diff_if(
       - ``straight_through`` uses hard forward behavior with a soft gate gradient.
     """
 
+    if mode not in {"pathwise", "soft", "straight_through"}:
+        raise ValueError("mode must be one of: pathwise, soft, straight_through")
+
     score_t = ensure_tensor(score)
-    hard_true = score_t.data > 0.0
+    hard_score = _require_finite_score(score_t)
+    hard_true = hard_score > 0.0
 
     if mode == "pathwise":
-        out = _value(true_fn if hard_true else false_fn)
-        hard_out_value = out.hard_value if out.hard_value is not None else out.data
-        out.hard_value = hard_out_value
+        out = _resolve_branch_value(true_fn if hard_true else false_fn)
+        hard_out_value = _attach_hard(out, hard_data(out))
         _record_branch(
             score=score_t,
+            hard_score=hard_score,
             selected_path="true" if hard_true else "false",
             output_hard=hard_out_value,
             output_soft=None,
@@ -191,20 +317,16 @@ def diff_if(
     if mode == "soft":
         return soft_if(score_t, true_fn, false_fn, beta=beta)
 
-    if mode != "straight_through":
-        raise ValueError("mode must be one of: pathwise, soft, straight_through")
-
-    true_t = _value(true_fn)
-    false_t = _value(false_fn)
-    gate = straight_through_gate(score_t, beta=beta)
-    soft_gate = sigmoid_gate(score_t, beta=beta)
+    beta = validate_temperature(beta, name="beta")
+    true_t, false_t = _evaluate_both_branches(hard_true, true_fn, false_fn)
+    gate, soft_gate = straight_through_gates(score_t, beta=beta)
     out = gate * true_t + (1.0 - gate) * false_t
     soft_out = soft_gate * true_t + (1.0 - soft_gate) * false_t
     hard_out = true_t if hard_true else false_t
-    hard_out_value = hard_out.hard_value if hard_out.hard_value is not None else hard_out.data
-    out.hard_value = hard_out_value
+    hard_out_value = _attach_hard(out, hard_data(hard_out))
     _record_branch(
         score=score_t,
+        hard_score=hard_score,
         selected_path="true" if hard_true else "false",
         output_hard=hard_out_value,
         output_soft=soft_out.data,
@@ -247,6 +369,16 @@ def soft_select(
         raise ValueError("values and scores must have the same length")
     if not values:
         raise ValueError("soft_select requires at least one candidate")
+    tau = validate_temperature(tau, name="tau")
+
+    if candidate_names is None:
+        names = [f"candidate_{idx}" for idx in range(len(values))]
+    else:
+        names = list(candidate_names)
+        if len(names) != len(values):
+            raise ValueError("candidate_names must have the same length as values")
+        if any(not isinstance(name, str) for name in names):
+            raise TypeError("candidate_names must contain only strings")
 
     value_tensors = [ensure_tensor(value) for value in values]
     score_tensors = [ensure_tensor(score) for score in scores]
@@ -255,67 +387,36 @@ def soft_select(
     for weight, value in zip(weights, value_tensors):
         out = out + weight * value
 
-    hard_index = max(range(len(score_tensors)), key=lambda i: score_tensors[i].data)
-    hard_out = value_tensors[hard_index]
-    hard_out_value = hard_out.hard_value if hard_out.hard_value is not None else hard_out.data
-    out.hard_value = hard_out_value
-
-    tr = current_trace()
-    if tr is not None:
-        weight_values = [weight.data for weight in weights]
-        metrics = FidelityMetrics(
-            hard_value=hard_out_value,
-            soft_value=out.data,
-            output_gap=scalar_gap(hard_out.data, out.data),
-            path_agreement=path_agrees(hard_index, weight_values),
-            gate_entropy=categorical_entropy(weight_values),
-            temperature=tau,
-        )
-        relaxation = RelaxationSpec(
-            surrogate_type="softmax_select",
-            temperature=tau,
-            estimator="surrogate",
-            notes="Hard argmax is paired with softmax-weighted candidate values.",
-        )
-        event_id = tr.next_id()
-        names = list(candidate_names) if candidate_names is not None else [
-            f"candidate_{idx}" for idx in range(len(values))
-        ]
-        node = SearchNode(
-            id=event_id,
-            candidates=names,
-            scores=[score.data for score in score_tensors],
-            selected_index=hard_index,
-            soft_weights=weight_values,
-            output_hard=hard_out_value,
-            output_soft=out.data,
-            fidelity=metrics,
-            relaxation=relaxation,
-        )
-        ledger = LedgerEntry(
-            id=event_id,
-            surrogate_type="softmax_select",
-            gradient_contract=(
-                "Forward surrogate is the softmax-weighted expected value; "
-                "gradients flow into candidate values and selection scores."
-            ),
-            bias_warning=(
-                "The gradient optimizes the soft expected value, so the learned "
-                "scores must still be evaluated with the original hard argmax."
-            ),
-            approximates="hard argmax over candidate scores",
-            gradient_flows_to=["candidate values", "candidate scores", "score parents"],
-            estimator="surrogate",
-            recommended_checks=[
-                "hard argmax objective after training",
-                "path agreement",
-                "candidate entropy",
-                "temperature sensitivity",
-            ],
-            fidelity_metrics=metrics,
-        )
-        tr.record_search(node, ledger)
+    hard_scores = [hard_data(score) for score in score_tensors]
+    hard_index = max(range(len(score_tensors)), key=hard_scores.__getitem__)
+    hard_out_value = _attach_hard(out, hard_data(value_tensors[hard_index]))
+    _record_search(
+        names=names,
+        hard_scores=hard_scores,
+        soft_scores=[score.data for score in score_tensors],
+        hard_index=hard_index,
+        soft_weights=[weight.data for weight in weights],
+        output_hard=hard_out_value,
+        output_soft=out.data,
+        tau=tau,
+    )
     return out
+
+
+def _loop_body_hard_value(candidate: Tensor, *, state: Tensor) -> float:
+    """Read the hard body update, refusing silent soft fallback."""
+
+    if candidate.hard_error is not None:
+        return hard_data(candidate)
+    if candidate.hard_value is not None:
+        return candidate.hard_value
+    if state.hard_value is None:
+        return candidate.data
+    raise ValueError(
+        "bounded_loop body dropped hard_value metadata while the hard "
+        "program was still alive; return Tensor results from Tensor ops "
+        "(avoid reading .data inside the body)."
+    )
 
 
 def bounded_loop(
@@ -330,25 +431,74 @@ def bounded_loop(
 
     This is intentionally limited: it relaxes a fixed maximum number of steps
     rather than claiming support for arbitrary data-dependent Python loops.
+    Once the carried state has a hard shadow, the body must return a ``Tensor``
+    that preserves ``hard_value`` (use Tensor ops; do not escape via ``.data``).
     """
+
+    if isinstance(steps, bool):
+        raise TypeError("steps must be an integer, not bool")
+    try:
+        step_count = integer_index(steps)
+    except TypeError:
+        raise TypeError("steps must be an integer") from None
+    if step_count < 0:
+        raise ValueError("steps must be non-negative")
+    beta = validate_temperature(beta, name="beta")
 
     state = ensure_tensor(init_state)
     alive = Tensor(1.0)
+    hard_state = hard_data(state)
+    hard_alive = True
     tr = current_trace()
-    for index in range(steps):
-        candidate = ensure_tensor(body_fn(index, state))
-        continue_score = ensure_tensor(continue_score_fn(index, state))
+    for index in range(step_count):
+        decision_on_hard_path = hard_alive
+        if hard_alive:
+            candidate = ensure_tensor(body_fn(index, state))
+            continue_score = ensure_tensor(continue_score_fn(index, state))
+        else:
+            with soft_only_region():
+                candidate = ensure_tensor(body_fn(index, state))
+                continue_score = ensure_tensor(continue_score_fn(index, state))
+        _require_finite_score(
+            continue_score,
+            name="continue_score",
+            require_hard=decision_on_hard_path,
+        )
         gate = sigmoid_gate(continue_score, beta=beta)
+
+        # After the hard program stops, keep unrolling the soft surrogate only.
+        # Do not consult hard continue scores again — that can abort a valid
+        # soft forward and pollute hard-path metadata with soft values.
+        hard_continue_score: float | None = None
+        if hard_alive:
+            hard_continue_score = hard_data(continue_score)
+            if hard_continue_score > 0.0:
+                hard_state = _loop_body_hard_value(candidate, state=state)
+            else:
+                hard_alive = False
+
         alive = alive * gate
         state = alive * candidate + (1.0 - alive) * state
+        # Do not execute hard metadata through later bodies after the original
+        # program has stopped; only the relaxed shadow continues to unroll.
+        if hard_alive:
+            _attach_hard(state, hard_state)
+        else:
+            state.hard_value = None
+            state.hard_error = None
         if tr is not None:
             tr.record_loop(
                 LoopFrame(
                     id=tr.next_id(),
                     iteration_index=index,
                     carried_state=state.data,
-                    stop_score=continue_score.data,
+                    continue_score=continue_score.data,
                     continue_gate=gate.data,
+                    hard_carried_state=hard_state,
+                    hard_continue_score=hard_continue_score,
+                    hard_alive=hard_alive,
+                    on_hard_path=decision_on_hard_path,
                 )
             )
+    _attach_hard(state, hard_state)
     return state

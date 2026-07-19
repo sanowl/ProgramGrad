@@ -29,3 +29,6 @@ Issues = "https://github.com/sanowl/ProgramGrad/issues"
 
 [tool.setuptools.packages.find]
 include = ["programgrad*"]
+
+[tool.setuptools.package-data]
+programgrad = ["py.typed"]

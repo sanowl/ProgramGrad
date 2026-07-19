@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from .fidelity import scalar_gap, summarize_final_loop
+from .relaxations import validate_temperature
 from .tensor import Tensor
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .ir import FidelityMetrics
+    from .trace import TraceContext
 
 
 @dataclass(frozen=True)
@@ -56,7 +63,7 @@ def _fmt(value: object) -> str:
         return "yes" if value else "no"
     if isinstance(value, float):
         return f"{value:.6g}"
-    return str(value)
+    return str(value).replace("|", "\\|").replace("\n", "<br>")
 
 
 def _markdown_table(headers: list[str], rows: Iterable[list[object]]) -> str:
@@ -69,59 +76,106 @@ def _markdown_table(headers: list[str], rows: Iterable[list[object]]) -> str:
     return "\n".join(lines)
 
 
-def hard_soft_rows(trace: "TraceContext", *, target: float | None = None) -> list[EvaluationRow]:
-    """Build rows comparing the hard program value with the soft surrogate."""
+def _event_row(
+    *,
+    event_id: int,
+    name: str,
+    kind: str,
+    hard_value: float,
+    soft_value: float | None,
+    metrics: "FidelityMetrics | None",
+    target: float | None,
+) -> tuple[int, EvaluationRow]:
+    hard_loss = squared_loss(hard_value, target) if target is not None else None
+    soft_loss = (
+        squared_loss(soft_value, target)
+        if target is not None and soft_value is not None
+        else None
+    )
+    return (
+        event_id,
+        EvaluationRow(
+            name=name,
+            kind=kind,
+            hard_value=hard_value,
+            soft_value=soft_value,
+            output_gap=None if metrics is None else metrics.output_gap,
+            target=target,
+            hard_loss=hard_loss,
+            soft_loss=soft_loss,
+            path_agreement=None if metrics is None else metrics.path_agreement,
+            entropy=None if metrics is None else metrics.gate_entropy,
+            temperature=None if metrics is None else metrics.temperature,
+        ),
+    )
 
-    rows: list[EvaluationRow] = []
+
+def hard_soft_rows(trace: "TraceContext", *, target: float | None = None) -> list[EvaluationRow]:
+    """Build rows comparing the hard program value with the soft surrogate.
+
+    When a trace was recorded with ``fidelity=False``, rows still come from the
+    structural branch/search nodes; gap/entropy/agreement fields stay ``None``.
+    """
+
+    indexed_rows: list[tuple[int, EvaluationRow]] = []
     for branch in trace.branches:
-        metrics = branch.fidelity
-        if metrics is None:
+        if not branch.on_hard_path:
             continue
-        hard_loss = squared_loss(metrics.hard_value, target) if target is not None else None
-        soft_loss = (
-            squared_loss(metrics.soft_value, target)
-            if target is not None and metrics.soft_value is not None
-            else None
-        )
-        rows.append(
-            EvaluationRow(
+        metrics = branch.fidelity
+        indexed_rows.append(
+            _event_row(
+                event_id=branch.id,
                 name=f"branch#{branch.id}:{branch.selected_path}",
                 kind="branch",
-                hard_value=metrics.hard_value,
-                soft_value=metrics.soft_value,
-                output_gap=metrics.output_gap,
+                hard_value=metrics.hard_value if metrics is not None else branch.output_hard,
+                soft_value=metrics.soft_value if metrics is not None else branch.output_soft,
+                metrics=metrics,
                 target=target,
-                hard_loss=hard_loss,
-                soft_loss=soft_loss,
-                path_agreement=metrics.path_agreement,
-                entropy=metrics.gate_entropy,
-                temperature=metrics.temperature,
             )
         )
     for search in trace.searches:
+        if not search.on_hard_path:
+            continue
         metrics = search.fidelity
-        hard_loss = squared_loss(metrics.hard_value, target) if target is not None else None
-        soft_loss = (
-            squared_loss(metrics.soft_value, target)
-            if target is not None and metrics.soft_value is not None
-            else None
-        )
-        rows.append(
-            EvaluationRow(
+        indexed_rows.append(
+            _event_row(
+                event_id=search.id,
                 name=f"search#{search.id}:candidate[{search.selected_index}]",
                 kind="search",
-                hard_value=metrics.hard_value,
-                soft_value=metrics.soft_value,
-                output_gap=metrics.output_gap,
+                hard_value=metrics.hard_value if metrics is not None else search.output_hard,
+                soft_value=metrics.soft_value if metrics is not None else search.output_soft,
+                metrics=metrics,
                 target=target,
-                hard_loss=hard_loss,
-                soft_loss=soft_loss,
-                path_agreement=metrics.path_agreement,
-                entropy=metrics.gate_entropy,
-                temperature=metrics.temperature,
             )
         )
-    return rows
+    loop_summary = summarize_final_loop(trace.loops, include_metrics=trace.fidelity)
+    if loop_summary is not None:
+        hard_loss = (
+            squared_loss(loop_summary.hard_value, target) if target is not None else None
+        )
+        soft_loss = (
+            squared_loss(loop_summary.soft_value, target) if target is not None else None
+        )
+        indexed_rows.append(
+            (
+                loop_summary.event_id,
+                EvaluationRow(
+                    name=f"loop#{loop_summary.event_id}:final",
+                    kind="loop",
+                    hard_value=loop_summary.hard_value,
+                    soft_value=loop_summary.soft_value,
+                    output_gap=loop_summary.output_gap,
+                    target=target,
+                    hard_loss=hard_loss,
+                    soft_loss=soft_loss,
+                    path_agreement=None,
+                    entropy=loop_summary.gate_entropy,
+                    temperature=None,
+                ),
+            )
+        )
+    indexed_rows.sort(key=lambda item: item[0])
+    return [row for _, row in indexed_rows]
 
 
 def format_hard_soft_table(rows: Iterable[EvaluationRow]) -> str:
@@ -173,16 +227,44 @@ def _looks_like_trace(value: object) -> bool:
     return hasattr(value, "branches") and hasattr(value, "searches") and hasattr(value, "fidelity_report")
 
 
-def _primary_fidelity(trace_obj: "TraceContext | None") -> tuple[float | None, float | None, bool | None]:
+def _fidelity_events(trace_obj: "TraceContext") -> list["FidelityMetrics"]:
+    events = [
+        (branch.id, branch.fidelity)
+        for branch in trace_obj.branches
+        if branch.fidelity is not None
+    ]
+    events.extend(
+        (search.id, search.fidelity)
+        for search in trace_obj.searches
+        if search.fidelity is not None
+    )
+    events.sort(key=lambda item: item[0])
+    return [metrics for _, metrics in events]
+
+
+def _match_fidelity(
+    trace_obj: "TraceContext | None",
+    *,
+    soft_value: float,
+    hard_value: float | None,
+) -> "FidelityMetrics | None":
     if trace_obj is None:
-        return None, None, None
-    events = []
-    events.extend(branch.fidelity for branch in trace_obj.branches if branch.fidelity is not None)
-    events.extend(search.fidelity for search in trace_obj.searches)
-    if not events:
-        return None, None, None
-    latest = events[-1]
-    return latest.output_gap, latest.gate_entropy, latest.path_agreement
+        return None
+    matches = [
+        metrics
+        for metrics in _fidelity_events(trace_obj)
+        if metrics.soft_value is not None
+        and math.isclose(metrics.soft_value, soft_value, rel_tol=0.0, abs_tol=1e-9)
+    ]
+    if hard_value is not None:
+        hard_matches = [
+            metrics
+            for metrics in matches
+            if math.isclose(metrics.hard_value, hard_value, rel_tol=0.0, abs_tol=1e-9)
+        ]
+        if hard_matches:
+            matches = hard_matches
+    return matches[-1] if matches else None
 
 
 def temperature_sensitivity(
@@ -194,31 +276,36 @@ def temperature_sensitivity(
     """Evaluate a relaxation across beta/tau values.
 
     ``run_fn`` receives a temperature and returns either a ``Tensor`` or a tuple
-    containing a ``Tensor`` and optionally a ``TraceContext``. The helper records
-    the soft value and, when available, the hard value/fidelity from the trace.
+    containing a ``Tensor`` and optionally a ``TraceContext``. Soft/hard values
+    come from the returned tensor; fidelity entropy/agreement are taken only from
+    a matching trace event when one exists.
     """
 
     rows: list[TemperatureSensitivityRow] = []
     for temperature in temperatures:
-        result = run_fn(float(temperature))
+        temperature = validate_temperature(temperature, name="temperature")
+        result = run_fn(temperature)
         tensor, trace_obj = _extract_primary_result(result)
-        gap, entropy, agreement = _primary_fidelity(trace_obj)
         hard_value = tensor.hard_value
-        if trace_obj is not None:
-            events = []
-            events.extend(branch.fidelity for branch in trace_obj.branches if branch.fidelity is not None)
-            events.extend(search.fidelity for search in trace_obj.searches)
-            if events:
-                hard_value = events[-1].hard_value
+        matched = _match_fidelity(
+            trace_obj,
+            soft_value=tensor.data,
+            hard_value=hard_value,
+        )
+        if hard_value is None and matched is not None:
+            hard_value = matched.hard_value
+        gap = scalar_gap(hard_value, tensor.data) if hard_value is not None else None
+        if matched is not None and matched.output_gap is not None:
+            gap = matched.output_gap
         loss = squared_loss(tensor.data, target) if target is not None else None
         rows.append(
             TemperatureSensitivityRow(
-                temperature=float(temperature),
+                temperature=temperature,
                 soft_value=tensor.data,
                 hard_value=hard_value,
                 output_gap=gap,
-                entropy=entropy,
-                path_agreement=agreement,
+                entropy=None if matched is None else matched.gate_entropy,
+                path_agreement=None if matched is None else matched.path_agreement,
                 loss=loss,
             )
         )
@@ -241,10 +328,3 @@ def format_temperature_table(rows: Iterable[TemperatureSensitivityRow]) -> str:
             for row in rows
         ],
     )
-
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # pragma: no cover
-    from .trace import TraceContext
-

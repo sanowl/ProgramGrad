@@ -21,8 +21,11 @@ argmax choices, thresholds, and reasoning/search programs.
 - Finite-difference `gradcheck`.
 - Trace IR for ops, branches, searches, loop frames, and semantic ledger entries.
 - `soft_if`, `diff_if`, `soft_argmax`, `soft_select`, and bounded loop relaxation.
+- Hard-shadow propagation through nested arithmetic and discrete decisions.
 - Hard-soft fidelity reports: output gap, path agreement, entropy, temperature.
 - Hard-vs-soft evaluation tables and temperature sensitivity reports.
+- Context-local traces that remain isolated across threads and async contexts.
+- Training fast path: `training_mode` / `training_trace` with cheap defaults.
 - SVG and JSON trace export.
 - Demos for learnable branch thresholds and tiny differentiable tree search.
 
@@ -67,6 +70,16 @@ tr.export_svg("threshold_trace.svg")
 The trace reports the hard branch, the soft gate, the hard-soft output gap, and
 a ledger warning that the gradient is a surrogate gradient rather than the true
 derivative of a discontinuous branch.
+
+Nested relaxed decisions retain both values: arithmetic uses the soft value for
+gradients while later hard branches and argmax operations consult the propagated
+hard shadow. Trace records expose both hard and soft decision scores when they
+diverge.
+
+The demos train inside `training_mode(hard_shadow=False)` for speed, then
+re-evaluate with a full fidelity trace after the last optimizer update so the
+reported trace, learned parameters, and hard-program evaluation describe the
+same final state.
 
 ## Trace screenshots
 

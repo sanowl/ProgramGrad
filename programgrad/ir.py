@@ -55,6 +55,7 @@ class ConditionNode:
     relaxation: RelaxationSpec
     temperature: float | None
     gradient_contract: str
+    soft_score: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -70,6 +71,7 @@ class BranchNode:
     output_hard: float
     output_soft: float | None
     fidelity: FidelityMetrics | None = None
+    on_hard_path: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -84,8 +86,12 @@ class LoopFrame:
     id: int
     iteration_index: int
     carried_state: float
-    stop_score: float | None = None
+    continue_score: float | None = None
     continue_gate: float | None = None
+    hard_carried_state: float | None = None
+    hard_continue_score: float | None = None
+    hard_alive: bool | None = None
+    on_hard_path: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -100,12 +106,15 @@ class SearchNode:
     soft_weights: list[float]
     output_hard: float
     output_soft: float
-    fidelity: FidelityMetrics
+    fidelity: FidelityMetrics | None
     relaxation: RelaxationSpec
+    soft_scores: list[float] | None = None
+    on_hard_path: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["fidelity"] = self.fidelity.to_dict()
+        if self.fidelity is not None:
+            data["fidelity"] = self.fidelity.to_dict()
         data["relaxation"] = self.relaxation.to_dict()
         return data
 

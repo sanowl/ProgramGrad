@@ -3,19 +3,77 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from itertools import count
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .ir import BranchNode, LedgerEntry, LoopFrame, OpNode, SearchNode
 
-_TRACE_STACK: list["TraceContext"] = []
+_TRACE_STACK: ContextVar[tuple["TraceContext", ...]] = ContextVar(
+    "programgrad_trace_stack",
+    default=(),
+)
+_SOFT_ONLY_DEPTH: ContextVar[int] = ContextVar("programgrad_soft_only_depth", default=0)
+# Hot-path flags: checked on every tensor op without walking the trace stack.
+_RECORD_OPS_ACTIVE: ContextVar[bool] = ContextVar("programgrad_record_ops", default=False)
+_HARD_SHADOW_ACTIVE: ContextVar[bool] = ContextVar("programgrad_hard_shadow", default=True)
 
 
 def current_trace() -> "TraceContext | None":
-    if not _TRACE_STACK:
+    stack = _TRACE_STACK.get()
+    if not stack:
         return None
-    return _TRACE_STACK[-1]
+    return stack[-1]
+
+
+def ops_recording_enabled() -> bool:
+    """True only inside a trace that requested per-op recording."""
+
+    return _RECORD_OPS_ACTIVE.get()
+
+
+def hard_shadow_enabled() -> bool:
+    """True while hard-program shadow values are being maintained."""
+
+    return _HARD_SHADOW_ACTIVE.get()
+
+
+def in_soft_only() -> bool:
+    """True while evaluating a branch/candidate off the original hard path."""
+
+    return _SOFT_ONLY_DEPTH.get() > 0
+
+
+@contextmanager
+def soft_only_region() -> Iterator[None]:
+    """Mark nested control-flow events as soft-only (not on the hard path)."""
+
+    token = _SOFT_ONLY_DEPTH.set(_SOFT_ONLY_DEPTH.get() + 1)
+    try:
+        yield
+    finally:
+        _SOFT_ONLY_DEPTH.reset(token)
+
+
+@contextmanager
+def training_mode(*, hard_shadow: bool = False) -> Iterator[None]:
+    """Cheap context for optimization loops.
+
+    Disables op recording and, by default, hard-shadow propagation. Use a full
+    ``trace(...)`` or ``training_trace()`` when you need decision fidelity.
+    """
+
+    if not isinstance(hard_shadow, bool):
+        raise TypeError("hard_shadow must be a bool")
+    ops_token = _RECORD_OPS_ACTIVE.set(False)
+    hard_token = _HARD_SHADOW_ACTIVE.set(hard_shadow)
+    try:
+        yield
+    finally:
+        _HARD_SHADOW_ACTIVE.reset(hard_token)
+        _RECORD_OPS_ACTIVE.reset(ops_token)
 
 
 def trace(
@@ -23,13 +81,34 @@ def trace(
     mode: str = "dual",
     relaxation: str = "soft_gate",
     fidelity: bool = True,
-    record_ops: bool = True,
+    record_ops: bool = False,
+    hard_shadow: bool = True,
 ) -> "TraceContext":
     return TraceContext(
         mode=mode,
         relaxation=relaxation,
         fidelity=fidelity,
         record_ops=record_ops,
+        hard_shadow=hard_shadow,
+    )
+
+
+def training_trace(
+    *,
+    mode: str = "dual",
+    relaxation: str = "soft_gate",
+    fidelity: bool = False,
+    record_ops: bool = False,
+    hard_shadow: bool = True,
+) -> "TraceContext":
+    """Trace preset for training: no op log, fidelity off unless requested."""
+
+    return TraceContext(
+        mode=mode,
+        relaxation=relaxation,
+        fidelity=fidelity,
+        record_ops=record_ops,
+        hard_shadow=hard_shadow,
     )
 
 
@@ -42,27 +121,54 @@ class TraceContext:
         mode: str = "dual",
         relaxation: str = "soft_gate",
         fidelity: bool = True,
-        record_ops: bool = True,
+        record_ops: bool = False,
+        hard_shadow: bool = True,
     ) -> None:
+        if not isinstance(mode, str):
+            raise TypeError("mode must be a string")
+        if not mode.strip():
+            raise ValueError("mode must not be empty")
+        if not isinstance(relaxation, str):
+            raise TypeError("relaxation must be a string")
+        if not relaxation.strip():
+            raise ValueError("relaxation must not be empty")
+        if not isinstance(fidelity, bool):
+            raise TypeError("fidelity must be a bool")
+        if not isinstance(record_ops, bool):
+            raise TypeError("record_ops must be a bool")
+        if not isinstance(hard_shadow, bool):
+            raise TypeError("hard_shadow must be a bool")
         self.mode = mode
         self.relaxation = relaxation
         self.fidelity = fidelity
         self.record_ops_enabled = record_ops
+        self.hard_shadow = hard_shadow
         self.ops: list[OpNode] = []
         self.branches: list[BranchNode] = []
         self.searches: list[SearchNode] = []
         self.loops: list[LoopFrame] = []
         self.ledger: list[LedgerEntry] = []
         self._ids = count()
+        self._ops_token: Token[bool] | None = None
+        self._hard_token: Token[bool] | None = None
 
     def __enter__(self) -> "TraceContext":
-        _TRACE_STACK.append(self)
+        self._ops_token = _RECORD_OPS_ACTIVE.set(self.record_ops_enabled)
+        self._hard_token = _HARD_SHADOW_ACTIVE.set(self.hard_shadow)
+        _TRACE_STACK.set((*_TRACE_STACK.get(), self))
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        popped = _TRACE_STACK.pop()
-        if popped is not self:  # pragma: no cover - stack corruption guard
+        stack = _TRACE_STACK.get()
+        if not stack or stack[-1] is not self:  # pragma: no cover - misuse guard
             raise RuntimeError("trace context stack corruption")
+        _TRACE_STACK.set(stack[:-1])
+        if self._hard_token is not None:
+            _HARD_SHADOW_ACTIVE.reset(self._hard_token)
+            self._hard_token = None
+        if self._ops_token is not None:
+            _RECORD_OPS_ACTIVE.reset(self._ops_token)
+            self._ops_token = None
 
     def next_id(self) -> int:
         return next(self._ids)
@@ -108,18 +214,41 @@ class TraceContext:
         self.loops.append(frame)
 
     def hard_path(self) -> list[str]:
-        path: list[str] = []
+        events: list[tuple[int, str]] = []
         for branch in self.branches:
-            path.append(
-                f"branch#{branch.id}:{branch.selected_path}"
-                f"(score={branch.condition.score:.6g})"
+            if not branch.on_hard_path:
+                continue
+            events.append(
+                (
+                    branch.id,
+                    f"branch#{branch.id}:{branch.selected_path}"
+                    f"(score={branch.condition.score:.6g})",
+                )
             )
         for search in self.searches:
-            path.append(
-                f"search#{search.id}:candidate[{search.selected_index}]"
-                f"(score={search.scores[search.selected_index]:.6g})"
+            if not search.on_hard_path:
+                continue
+            events.append(
+                (
+                    search.id,
+                    f"search#{search.id}:candidate[{search.selected_index}]"
+                    f"(score={search.scores[search.selected_index]:.6g})",
+                )
             )
-        return path
+        for loop in self.loops:
+            # Soft-only unroll frames after hard exit are omitted from the hard path.
+            if not loop.on_hard_path or loop.hard_continue_score is None:
+                continue
+            decision = "continue" if loop.hard_alive else "stop"
+            events.append(
+                (
+                    loop.id,
+                    f"loop#{loop.id}:iteration[{loop.iteration_index}]:{decision}"
+                    f"(score={loop.hard_continue_score:.6g})",
+                )
+            )
+        events.sort(key=lambda event: event[0])
+        return [description for _, description in events]
 
     def soft_gates(self) -> list[float]:
         gates = [
@@ -138,13 +267,35 @@ class TraceContext:
             for branch in self.branches
             if branch.fidelity is not None
         ]
-        search_rows = [search.fidelity.to_dict() for search in self.searches]
-        return {"branches": branch_rows, "searches": search_rows}
+        search_rows = [
+            search.fidelity.to_dict()
+            for search in self.searches
+            if search.fidelity is not None
+        ]
+        from .fidelity import summarize_final_loop
+
+        loop_rows: list[dict[str, Any]] = []
+        summary = summarize_final_loop(self.loops, include_metrics=self.fidelity)
+        if summary is not None and self.fidelity:
+            loop_rows.append(
+                {
+                    "hard_value": summary.hard_value,
+                    "soft_value": summary.soft_value,
+                    "output_gap": summary.output_gap,
+                    "path_agreement": None,
+                    "gate_entropy": summary.gate_entropy,
+                    "temperature": None,
+                }
+            )
+        return {"branches": branch_rows, "searches": search_rows, "loops": loop_rows}
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
             "relaxation": self.relaxation,
+            "fidelity": self.fidelity,
+            "record_ops": self.record_ops_enabled,
+            "hard_shadow": self.hard_shadow,
             "ops": [node.to_dict() for node in self.ops],
             "branches": [node.to_dict() for node in self.branches],
             "searches": [node.to_dict() for node in self.searches],
@@ -154,6 +305,7 @@ class TraceContext:
 
     def export_json(self, path: str | Path) -> Path:
         output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
         return output
 
@@ -164,7 +316,11 @@ class TraceContext:
 
     def show(self) -> str:
         lines = ["ProgramGrad trace"]
-        lines.append(f"mode={self.mode}, relaxation={self.relaxation}")
+        lines.append(
+            f"mode={self.mode}, relaxation={self.relaxation}, "
+            f"fidelity={self.fidelity}, record_ops={self.record_ops_enabled}, "
+            f"hard_shadow={self.hard_shadow}"
+        )
         if self.branches:
             lines.append("branches:")
             for branch in self.branches:
@@ -181,9 +337,25 @@ class TraceContext:
             lines.append("searches:")
             for search in self.searches:
                 weights = ", ".join(f"{w:.3g}" for w in search.soft_weights)
+                gap = None if search.fidelity is None else search.fidelity.output_gap
+                gap_text = "none" if gap is None else f"{gap:.6g}"
                 lines.append(
                     f"  #{search.id} selected={search.selected_index} "
-                    f"weights=[{weights}] gap={search.fidelity.output_gap:.6g}"
+                    f"weights=[{weights}] gap={gap_text}"
+                )
+        if self.loops:
+            lines.append("loops:")
+            for loop in self.loops:
+                gate = "none" if loop.continue_gate is None else f"{loop.continue_gate:.6g}"
+                hard_state = (
+                    "none"
+                    if loop.hard_carried_state is None
+                    else f"{loop.hard_carried_state:.6g}"
+                )
+                decision = "continue" if loop.hard_alive else "stop"
+                lines.append(
+                    f"  #{loop.id} iteration={loop.iteration_index} hard={decision} "
+                    f"hard_state={hard_state} soft_state={loop.carried_state:.6g} gate={gate}"
                 )
         if self.ledger:
             lines.append("gradient ledger:")

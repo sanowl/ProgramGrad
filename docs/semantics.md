@@ -40,11 +40,57 @@ branch values and through the gate score.
 `straight_through` uses a hard forward decision and a soft backward gate. It is
 reported as a biased estimator in the ledger.
 
+## Nested decisions
+
+Every relaxed control-flow output carries its original hard-program value as a
+shadow alongside the differentiable soft value. Deterministic tensor operations
+propagate both values. If the hard shadow leaves the real domain while the soft
+path remains valid, the soft result stays available and the tensor retains a
+deferred hard error. A later hard branch or argmax raises that error instead of
+silently substituting the soft value. Valid hard decisions still consult the
+hard shadow while gates and softmax weights use the soft score. Traces record
+both scores so path disagreement remains visible. Nested decisions evaluated
+only to build an unselected soft branch are marked `on_hard_path=False` and are
+omitted from `hard_path` / hard-vs-soft evaluation rows.
+
+## Bounded loops
+
+`bounded_loop` validates a finite positive gate temperature and a non-negative
+integer step bound. It unrolls the soft survival-gate surrogate for the full
+bound while separately retaining the state at which the original hard loop
+stopped. Once the carried state has a hard shadow, the body must keep returning
+`Tensor` values that preserve `hard_value` (do not escape through `.data`).
+This is still a controlled relaxation rather than general Python loop
+differentiation.
+Loop frames expose hard continue/stop decisions and hard/soft carried state in
+JSON, text, hard-path, and SVG trace views.
+
 ## Fidelity
 
 Trace fidelity reports currently include hard-soft output gap, path agreement,
 gate entropy, and temperature. Demos should always evaluate the learned
 parameters with the original hard decision rule, not only the soft loss.
+Passing `fidelity=False` keeps structural trace and ledger events but omits the
+metric payloads. `hard_soft_rows` still builds comparison rows from structural
+branch, search, and final loop outputs; gap, entropy, and agreement stay unset
+unless fidelity metrics were recorded.
+
+## Training fast path
+
+Optimization loops should avoid per-op tracing. `trace(...)` defaults to
+`record_ops=False`. For pure training steps use:
+
+```python
+with training_mode(hard_shadow=False):
+    y = soft_if(...)
+    loss = (y - target) ** 2
+    loss.backward()
+```
+
+`training_mode(hard_shadow=False)` skips hard-shadow propagation so only the soft
+surrogate graph is built. Re-enable a full `trace(fidelity=True)` (or
+`training_trace(...)` for a light decision log) when you need hard-path reports.
+Nested hard-shadow semantics require `hard_shadow=True`.
 
 ## Semantic ledger
 
