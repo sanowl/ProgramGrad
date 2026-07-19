@@ -132,6 +132,32 @@ class EvaluationTests(unittest.TestCase):
         self.assertAlmostEqual(rows[0].output_gap, abs(2.0 - rows[0].soft_value))
         self.assertNotEqual(rows[0].hard_value, 100.0)
 
+    def test_temperature_sensitivity_prefers_ste_soft_from_trace(self):
+        from programgrad import diff_if
+
+        def run_once(beta: float):
+            with trace(mode="dual", fidelity=True, record_ops=False) as tr:
+                result = diff_if(
+                    -0.5,
+                    lambda: 10.0,
+                    lambda: 2.0,
+                    mode="straight_through",
+                    beta=beta,
+                )
+            return result, tr
+
+        rows = temperature_sensitivity(run_once, [2.0])
+        result, _tr = run_once(2.0)
+        # Hard-forward .data equals hard_value; soft_value comes from the trace.
+        self.assertAlmostEqual(result.data, result.hard_value)
+        self.assertAlmostEqual(rows[0].hard_value, result.hard_value)
+        self.assertNotAlmostEqual(rows[0].soft_value, result.data)
+        self.assertGreater(rows[0].output_gap, 0.0)
+        self.assertAlmostEqual(
+            rows[0].output_gap,
+            abs(rows[0].hard_value - rows[0].soft_value),
+        )
+
     def test_markdown_tables_escape_cell_separators_and_newlines(self):
         row = EvaluationRow(
             name="branch|name\nnext",
@@ -148,9 +174,14 @@ class EvaluationTests(unittest.TestCase):
         value.hard_value = 2.0
         loss = hybrid_loss(value, target=2.0, gap_weight=1.0)
         loss.backward()
-        self.assertAlmostEqual(loss.data, 8.0)  # (0-2)^2 + (0-2)^2
+
+        self.assertAlmostEqual(loss.data, 8.0)
         self.assertLess(value.grad, 0.0)
         self.assertAlmostEqual(hard_squared_loss(value, 2.0), 0.0)
+
+    def test_hybrid_loss_rejects_negative_gap_weight(self):
+        value = Tensor(1.0)
+        value.hard_value = 1.0
         with self.assertRaisesRegex(ValueError, "gap_weight"):
             hybrid_loss(value, 1.0, gap_weight=-1.0)
 

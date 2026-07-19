@@ -37,6 +37,14 @@ def path_agrees(hard_index: int, weights: list[float]) -> bool:
     return max(range(len(weights)), key=lambda i: weights[i]) == hard_index
 
 
+def loop_decision_label(frame: "LoopFrame") -> str:
+    """Human-readable hard-loop decision for a recorded frame."""
+
+    if frame.hard_continue_score is None:
+        return "soft-unroll"
+    return "continue" if frame.hard_alive else "stop"
+
+
 @dataclass(frozen=True)
 class FinalLoopSummary:
     """Hard vs soft comparison for the final bounded-loop state."""
@@ -53,7 +61,7 @@ def summarize_final_loop(
     *,
     include_metrics: bool,
 ) -> FinalLoopSummary | None:
-    """Compare frozen hard state against the final soft carried state."""
+    """Compare frozen hard state against the loop's returned soft value."""
 
     hard_loops = [frame for frame in loops if frame.on_hard_path]
     if not hard_loops or not loops:
@@ -63,7 +71,11 @@ def summarize_final_loop(
     if hard_frame.hard_carried_state is None:
         return None
     hard_value = hard_frame.hard_carried_state
-    soft_value = soft_frame.carried_state
+    soft_value = (
+        soft_frame.output_soft
+        if soft_frame.output_soft is not None
+        else soft_frame.carried_state
+    )
     return FinalLoopSummary(
         event_id=soft_frame.id,
         hard_value=hard_value,

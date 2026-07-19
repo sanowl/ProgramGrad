@@ -14,7 +14,11 @@ ProgramGrad v0.1 alpha is intentionally narrow.
   must still be valid on their soft inputs.
 - Gumbel selection modes are stochastic unless a `seed` is provided.
 - `exit_distribution` loops still evaluate bodies under a survival-carried soft
-  state; only the returned soft value uses the discrete exit mixture.
+  state; only the returned soft value uses the discrete exit mixture. Fidelity
+  rows compare hard against that returned soft value (`LoopFrame.output_soft`).
+- Soft-only nested decisions (unselected branches) use soft scores for local
+  metadata and must not abort the surrogate when an off-path score has a
+  deferred hard error.
 - Hard-shadow arithmetic can diverge from the soft domain; the soft forward
   continues and the tensor keeps a deferred hard error. Later hard decisions
   that call `hard_data` raise instead of silently substituting the soft value.
@@ -22,6 +26,8 @@ ProgramGrad v0.1 alpha is intentionally narrow.
   behavior is not expected to match finite differences.
 - `training_mode(hard_shadow=False)` is for soft-surrogate optimization only; it
   disables nested hard-shadow bookkeeping until you re-enter a normal trace.
+  Defaults differ from `training_trace(hard_shadow=True)`.
+- `fidelity=True` requires `hard_shadow=True`.
 - The SVG exporter is a lightweight trace view intended for examples and tests,
   not a full browser inspector.
 

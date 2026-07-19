@@ -92,6 +92,9 @@ class LoopFrame:
     hard_continue_score: float | None = None
     hard_alive: bool | None = None
     on_hard_path: bool = True
+    # Soft value returned by the loop surrogate so far. For survival mode this
+    # matches carried_state; for exit_distribution it is the exit-mass mixture.
+    output_soft: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

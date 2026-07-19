@@ -94,11 +94,11 @@ soft surrogate value, fidelity gap, and semantic gradient warning.
 
 ### Learnable branch threshold
 
-![ProgramGrad threshold trace](docs/assets/threshold-demo.svg)
+![ProgramGrad threshold trace](https://raw.githubusercontent.com/sanowl/ProgramGrad/main/docs/assets/threshold-demo.svg)
 
 ### Tiny differentiable tree search
 
-![ProgramGrad tree search trace](docs/assets/tree-search-demo.svg)
+![ProgramGrad tree search trace](https://raw.githubusercontent.com/sanowl/ProgramGrad/main/docs/assets/tree-search-demo.svg)
 
 ## Run tests
 

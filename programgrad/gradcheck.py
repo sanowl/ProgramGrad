@@ -18,6 +18,26 @@ class GradcheckResult:
     max_rel_error: float
 
 
+def _require_positive(value: float, *, name: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number <= 0.0:
+        raise ValueError(f"{name} must be a finite positive number")
+    return number
+
+
+def _require_nonnegative(value: float, *, name: str) -> float:
+    number = float(value)
+    if not math.isfinite(number) or number < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative number")
+    return number
+
+
+def _as_tensor_output(value: object) -> Tensor:
+    if not isinstance(value, Tensor):
+        raise TypeError("gradcheck function must return a Tensor")
+    return value
+
+
 def gradcheck(
     fn: Callable[..., Tensor],
     inputs: Sequence[float],
@@ -28,15 +48,9 @@ def gradcheck(
 ) -> GradcheckResult:
     """Compare reverse-mode gradients with central finite differences."""
 
-    eps = float(eps)
-    atol = float(atol)
-    rtol = float(rtol)
-    if not math.isfinite(eps) or eps <= 0.0:
-        raise ValueError("eps must be a finite positive number")
-    if not math.isfinite(atol) or atol < 0.0:
-        raise ValueError("atol must be a finite non-negative number")
-    if not math.isfinite(rtol) or rtol < 0.0:
-        raise ValueError("rtol must be a finite non-negative number")
+    eps = _require_positive(eps, name="eps")
+    atol = _require_nonnegative(atol, name="atol")
+    rtol = _require_nonnegative(rtol, name="rtol")
 
     values = [float(value) for value in inputs]
     if any(not math.isfinite(value) for value in values):
@@ -45,9 +59,7 @@ def gradcheck(
         Tensor(value, requires_grad=True, name=f"x{idx}")
         for idx, value in enumerate(values)
     ]
-    output = fn(*tensors)
-    if not isinstance(output, Tensor):
-        raise TypeError("gradcheck function must return a Tensor")
+    output = _as_tensor_output(fn(*tensors))
     output.backward()
     analytical = [tensor.grad for tensor in tensors]
 
@@ -57,13 +69,13 @@ def gradcheck(
         minus = list(values)
         plus[idx] += eps
         minus[idx] -= eps
-        plus_output = fn(*[Tensor(value, requires_grad=True) for value in plus])
-        minus_output = fn(*[Tensor(value, requires_grad=True) for value in minus])
-        if not isinstance(plus_output, Tensor) or not isinstance(minus_output, Tensor):
-            raise TypeError("gradcheck function must return a Tensor")
-        y_plus = plus_output.data
-        y_minus = minus_output.data
-        numerical.append((y_plus - y_minus) / (2.0 * eps))
+        plus_output = _as_tensor_output(
+            fn(*[Tensor(value, requires_grad=True) for value in plus])
+        )
+        minus_output = _as_tensor_output(
+            fn(*[Tensor(value, requires_grad=True) for value in minus])
+        )
+        numerical.append((plus_output.data - minus_output.data) / (2.0 * eps))
 
     abs_errors = [abs(a - n) for a, n in zip(analytical, numerical)]
     rel_errors = [

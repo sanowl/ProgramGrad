@@ -81,19 +81,18 @@ class ControlFlowTests(unittest.TestCase):
         self.assertAlmostEqual(tr.searches[-1].fidelity.hard_value, 3.0)
         self.assertAlmostEqual(tr.searches[-1].fidelity.output_gap, abs(3.0 - outer.data))
 
-    def test_temperature_validation_rejects_non_positive_values(self):
-        with self.assertRaisesRegex(ValueError, "beta must be a finite positive number"):
-            sigmoid_gate(0.0, beta=0.0)
-        with self.assertRaisesRegex(ValueError, "tau must be a finite positive number"):
-            softmax([1.0, 2.0], tau=math.nan)
-        with self.assertRaisesRegex(ValueError, "beta must be a finite positive number"):
-            straight_through_gate(1.0, beta=-3.0)
-        with self.assertRaisesRegex(ValueError, "beta must be a finite positive number"):
-            sigmoid_gate(0.0, beta=None)
-        with self.assertRaisesRegex(ValueError, "not bool"):
-            sigmoid_gate(0.0, beta=True)
-        with self.assertRaisesRegex(ValueError, "not bool"):
-            softmax([1.0, 2.0], tau=True)
+    def test_temperature_validation_rejects_invalid_values(self):
+        cases = [
+            (lambda: sigmoid_gate(0.0, beta=0.0), ValueError, "beta must be a finite positive number"),
+            (lambda: softmax([1.0, 2.0], tau=math.nan), ValueError, "tau must be a finite positive number"),
+            (lambda: straight_through_gate(1.0, beta=-3.0), ValueError, "beta must be a finite positive number"),
+            (lambda: sigmoid_gate(0.0, beta=None), ValueError, "beta must be a finite positive number"),
+            (lambda: sigmoid_gate(0.0, beta=True), ValueError, "not bool"),
+            (lambda: softmax([1.0, 2.0], tau=True), ValueError, "not bool"),
+        ]
+        for call, error, message in cases:
+            with self.subTest(message=message, error=error), self.assertRaisesRegex(error, message):
+                call()
 
     def test_nested_soft_branch_uses_original_hard_path(self):
         with trace(mode="dual", fidelity=True, record_ops=False) as tr:
@@ -120,10 +119,22 @@ class ControlFlowTests(unittest.TestCase):
         self.assertFalse(tr.searches[0].fidelity.path_agreement)
 
     def test_soft_select_validates_candidate_names(self):
-        with self.assertRaisesRegex(ValueError, "candidate_names"):
-            soft_select([1.0, 2.0], [0.0, 1.0], candidate_names=["only-one"])
-        with self.assertRaisesRegex(TypeError, "only strings"):
-            soft_select([1.0], [0.0], candidate_names=[1])
+        cases = [
+            (
+                lambda: soft_select([1.0, 2.0], [0.0, 1.0], candidate_names=["only-one"]),
+                ValueError,
+                "candidate_names",
+            ),
+            (
+                lambda: soft_select([1.0], [0.0], candidate_names=[1]),
+                TypeError,
+                "only strings",
+            ),
+        ]
+        for action, error, match in cases:
+            with self.subTest(match=match):
+                with self.assertRaisesRegex(error, match):
+                    action()
 
     def test_fidelity_flag_disables_metrics_but_keeps_trace(self):
         with trace(mode="dual", fidelity=False, record_ops=False) as tr:
@@ -138,7 +149,7 @@ class ControlFlowTests(unittest.TestCase):
         self.assertTrue(all(entry["fidelity_metrics"] is None for entry in tr.gradient_ledger()))
         self.assertIn("gap=none", tr.show())
 
-    def test_bounded_loop_tracks_hard_stop_and_validates_configuration(self):
+    def test_bounded_loop_tracks_hard_stop(self):
         initial = Tensor(0.0, requires_grad=True)
         with trace(mode="dual", fidelity=True, record_ops=False) as tr:
             result = bounded_loop(
@@ -161,19 +172,34 @@ class ControlFlowTests(unittest.TestCase):
         self.assertIsNone(tr.loops[3].hard_continue_score)
         self.assertAlmostEqual(tr.loops[3].hard_carried_state, 2.0)
         self.assertIn("hard_state=2", tr.show())
+
         hard_path = tr.hard_path()
-        self.assertTrue(any(":stop" in event for event in hard_path))
         self.assertEqual(sum(":stop" in event for event in hard_path), 1)
-        self.assertEqual(sum("soft-unroll" in event for event in hard_path), 0)
+        self.assertFalse(any("soft-unroll" in event for event in hard_path))
         self.assertGreater(initial.grad, 0.0)
-        self.assertIn("loops", tr.fidelity_report())
         self.assertAlmostEqual(tr.fidelity_report()["loops"][0]["hard_value"], 2.0)
-        with self.assertRaisesRegex(ValueError, "non-negative"):
-            bounded_loop(0.0, -1, lambda _i, state: state, lambda _i, _state: 1.0)
-        with self.assertRaisesRegex(TypeError, "not bool"):
-            bounded_loop(0.0, True, lambda _i, state: state, lambda _i, _state: 1.0)
-        with self.assertRaisesRegex(ValueError, "beta"):
-            bounded_loop(0.0, 0, lambda _i, state: state, lambda _i, _state: 1.0, beta=0.0)
+
+    def test_bounded_loop_rejects_invalid_configuration(self):
+        body = lambda _i, state: state
+        continue_fn = lambda _i, _state: 1.0
+        cases = [
+            (lambda: bounded_loop(0.0, -1, body, continue_fn), ValueError, "non-negative"),
+            (lambda: bounded_loop(0.0, True, body, continue_fn), TypeError, "not bool"),
+            (lambda: bounded_loop(0.0, 0, body, continue_fn, beta=0.0), ValueError, "beta"),
+            (
+                lambda: bounded_loop(0.0, 1, body, lambda _i, _state: math.nan),
+                ValueError,
+                "continue_score must be finite",
+            ),
+            (
+                lambda: bounded_loop(0.0, 0, body, continue_fn, mode="nope"),
+                ValueError,
+                "mode must be one of",
+            ),
+        ]
+        for call, error, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(error, message):
+                call()
 
     def test_bounded_loop_rejects_body_that_drops_hard_metadata(self):
         initial = Tensor(0.0)
@@ -219,12 +245,15 @@ class ControlFlowTests(unittest.TestCase):
         self.assertAlmostEqual(weights[1].hard_value, 0.0)
 
     def test_softmax_rejects_non_finite_scores(self):
-        with self.assertRaisesRegex(ValueError, "scores must be finite"):
-            softmax([0.0, math.nan])
         hard_infinite = Tensor(0.0)
         hard_infinite.hard_value = math.inf
-        with self.assertRaisesRegex(ValueError, "hard scores must be finite"):
-            softmax([hard_infinite, 0.0])
+        cases = [
+            (lambda: softmax([0.0, math.nan]), "scores must be finite"),
+            (lambda: softmax([hard_infinite, 0.0]), "hard scores must be finite"),
+        ]
+        for call, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                call()
 
     def test_unselected_invalid_hard_branch_does_not_poison_output(self):
         denominator = Tensor(2.0)
@@ -235,6 +264,45 @@ class ControlFlowTests(unittest.TestCase):
         self.assertAlmostEqual(result.hard_value, 4.0)
         self.assertIsNone(result.hard_error)
 
+    def test_soft_only_nested_branch_tolerates_unavailable_hard_score(self):
+        denominator = Tensor(1.0)
+        denominator.hard_value = 0.0
+        bad_score = Tensor(1.0) / denominator
+
+        with trace(mode="dual", fidelity=True, record_ops=False) as tr:
+            result = soft_if(
+                1.0,
+                0.0,
+                lambda: soft_if(bad_score, 5.0, 7.0, beta=1.0),
+                beta=50.0,
+            )
+
+        self.assertTrue(math.isfinite(result.data))
+        self.assertAlmostEqual(result.hard_value, 0.0)
+        self.assertIsNone(result.hard_error)
+        self.assertEqual(len(tr.branches), 2)
+        nested, outer = tr.branches
+        self.assertFalse(nested.on_hard_path)
+        self.assertTrue(outer.on_hard_path)
+
+    def test_soft_only_nested_select_tolerates_unavailable_hard_score(self):
+        denominator = Tensor(1.0)
+        denominator.hard_value = 0.0
+        bad_score = Tensor(1.0) / denominator
+
+        with trace(mode="dual", fidelity=True, record_ops=False) as tr:
+            result = soft_if(
+                1.0,
+                0.0,
+                lambda: soft_select([5.0, 7.0], [bad_score, 0.0], tau=1.0),
+                beta=50.0,
+            )
+
+        self.assertTrue(math.isfinite(result.data))
+        self.assertAlmostEqual(result.hard_value, 0.0)
+        self.assertIsNone(result.hard_error)
+        self.assertFalse(tr.searches[0].on_hard_path)
+
     def test_selected_invalid_hard_branch_fails_explicitly(self):
         denominator = Tensor(2.0)
         denominator.hard_value = 0.0
@@ -244,10 +312,13 @@ class ControlFlowTests(unittest.TestCase):
             soft_if(-1.0, 4.0, invalid_branch)
 
     def test_branch_rejects_non_finite_scores(self):
-        with self.assertRaisesRegex(ValueError, "score must be finite"):
-            soft_if(math.nan, 1.0, 0.0)
-        with self.assertRaisesRegex(ValueError, "score must be finite"):
-            diff_if(math.inf, lambda: 1.0, lambda: 0.0, mode="pathwise")
+        cases = [
+            (lambda: soft_if(math.nan, 1.0, 0.0), "score must be finite"),
+            (lambda: diff_if(math.inf, lambda: 1.0, lambda: 0.0, mode="pathwise"), "score must be finite"),
+        ]
+        for call, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                call()
 
     def test_bounded_loop_ignores_hard_errors_after_hard_stop(self):
         def body(_index: int, state: Tensor) -> Tensor:
@@ -284,26 +355,17 @@ class ControlFlowTests(unittest.TestCase):
 
         self.assertEqual(len(tr.branches), 3)
         self.assertTrue(tr.branches[0].on_hard_path)
-        nested = [branch for branch in tr.branches[1:] ]
-        self.assertEqual(sum(branch.on_hard_path for branch in nested), 1)
-        self.assertEqual(sum(not branch.on_hard_path for branch in nested), 1)
+        nested = tr.branches[1:]
+        self.assertEqual([branch.on_hard_path for branch in nested].count(True), 1)
+        self.assertEqual([branch.on_hard_path for branch in nested].count(False), 1)
         hard_path = tr.hard_path()
         self.assertEqual(len(hard_path), 2)
-        self.assertTrue(all("branch#" in event for event in hard_path))
+        self.assertTrue(all(event.startswith("branch#") for event in hard_path))
 
     def test_bounded_loop_zero_steps_keeps_hard_value(self):
         result = bounded_loop(3.0, 0, lambda _i, state: state, lambda _i, _state: 1.0)
         self.assertAlmostEqual(result.data, 3.0)
         self.assertAlmostEqual(result.hard_value, 3.0)
-
-    def test_bounded_loop_rejects_non_finite_continue_score(self):
-        with self.assertRaisesRegex(ValueError, "continue_score must be finite"):
-            bounded_loop(
-                0.0,
-                1,
-                lambda _i, state: state,
-                lambda _i, _state: math.nan,
-            )
 
     def test_soft_select_gumbel_modes_keep_hard_argmax(self):
         with trace(mode="dual", fidelity=True, record_ops=False) as tr:
@@ -333,9 +395,9 @@ class ControlFlowTests(unittest.TestCase):
             "gumbel_straight_through_select",
         )
         self.assertAlmostEqual(sum(tr.searches[0].soft_weights), 1.0)
-        # Straight-through forward is a hard one-hot sample of a candidate value.
         self.assertIn(ste.data, (1.0, 5.0))
-        ste.zero_grad()
+
+    def test_gumbel_straight_through_provides_score_gradient(self):
         score = Tensor(0.0, requires_grad=True)
         out = soft_select([1.0, 5.0], [score, 2.0], mode="gumbel_st", seed=3, tau=0.7)
         (out - 5.0).backward()
@@ -356,13 +418,33 @@ class ControlFlowTests(unittest.TestCase):
                 mode="exit_distribution",
             )
 
-        # continue gate at score 0 is 0.5, so exit masses are 0.5 then 0.5
-        # candidates are 1 then soft-carried next body sees mixed state.
+        # At continue-score 0, gate=0.5, so exit masses are 0.5 then 0.5.
         self.assertAlmostEqual(result.hard_value, 0.0)
         self.assertGreater(result.data, 0.0)
         self.assertEqual(len(tr.loops), 2)
-        with self.assertRaisesRegex(ValueError, "mode must be one of"):
-            bounded_loop(0.0, 0, lambda _i, state: state, lambda _i, _state: 1.0, mode="nope")
+        self.assertAlmostEqual(tr.loops[-1].output_soft, result.data)
+
+    def test_bounded_loop_exit_distribution_fidelity_matches_returned_soft(self):
+        from programgrad import hard_soft_rows
+
+        with trace(mode="dual", fidelity=True, record_ops=False) as tr:
+            result = bounded_loop(
+                0.0,
+                2,
+                lambda index, _state: Tensor(float(index + 1)),
+                lambda index, _state: 1.0 if index < 1 else -1.0,
+                beta=50.0,
+                mode="exit_distribution",
+            )
+
+        rows = hard_soft_rows(tr)
+        loop_row = next(row for row in rows if row.kind == "loop")
+        self.assertAlmostEqual(loop_row.soft_value, result.data)
+        self.assertAlmostEqual(loop_row.hard_value, result.hard_value)
+        self.assertAlmostEqual(
+            loop_row.output_gap,
+            abs(result.hard_value - result.data),
+        )
 
 
 if __name__ == "__main__":

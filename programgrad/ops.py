@@ -1,4 +1,8 @@
-"""Convenience wrappers around scalar Tensor operations."""
+"""Internal convenience wrappers around scalar Tensor operations.
+
+Not part of the public ``programgrad`` API surface. Prefer ``Tensor`` methods
+in user code; ``tensor_sum`` is used by relaxations for a clean sum graph.
+"""
 
 from __future__ import annotations
 

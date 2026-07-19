@@ -91,6 +91,49 @@ def _record_op(
         tr.record_op(op_name, list(inputs), output, local_derivative)
 
 
+def _binary_op(
+    lhs: "Tensor",
+    rhs: "Tensor",
+    *,
+    op_name: str,
+    soft_value: float,
+    hard_fn: Callable[[float, float], float],
+    local_derivative: dict[str, float | str],
+    accumulate: Callable[["Tensor"], None],
+) -> "Tensor":
+    out = Tensor(
+        soft_value,
+        requires_grad=lhs.requires_grad or rhs.requires_grad,
+        _children=(lhs, rhs),
+        _op=op_name,
+    )
+    _propagate_hard(out, (lhs, rhs), hard_fn)
+    out._backward = lambda: accumulate(out)
+    _record_op(op_name, (lhs, rhs), out, local_derivative)
+    return out
+
+
+def _unary_op(
+    value: "Tensor",
+    *,
+    op_name: str,
+    soft_value: float,
+    hard_fn: Callable[[float], float],
+    local_derivative: dict[str, float | str],
+    accumulate: Callable[["Tensor"], None],
+) -> "Tensor":
+    out = Tensor(
+        soft_value,
+        requires_grad=value.requires_grad,
+        _children=(value,),
+        _op=op_name,
+    )
+    _propagate_hard(out, (value,), hard_fn)
+    out._backward = lambda: accumulate(out)
+    _record_op(op_name, (value,), out, local_derivative)
+    return out
+
+
 class Tensor:
     """Scalar reverse-mode autodiff value.
 
@@ -147,91 +190,80 @@ class Tensor:
 
     def __add__(self, other: Any) -> "Tensor":
         other = ensure_tensor(other)
-        out = Tensor(
-            self.data + other.data,
-            requires_grad=self.requires_grad or other.requires_grad,
-            _children=(self, other),
-            _op="add",
-        )
-        _propagate_hard(out, (self, other), lambda lhs, rhs: lhs + rhs)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad += out.grad
             if other.requires_grad:
                 other.grad += out.grad
 
-        out._backward = _backward
-        _record_op("add", (self, other), out, {"dout/dlhs": 1.0, "dout/drhs": 1.0})
-        return out
+        return _binary_op(
+            self,
+            other,
+            op_name="add",
+            soft_value=self.data + other.data,
+            hard_fn=lambda lhs, rhs: lhs + rhs,
+            local_derivative={"dout/dlhs": 1.0, "dout/drhs": 1.0},
+            accumulate=accumulate,
+        )
 
     def __radd__(self, other: Any) -> "Tensor":
         return self + other
 
     def __sub__(self, other: Any) -> "Tensor":
         other = ensure_tensor(other)
-        out = Tensor(
-            self.data - other.data,
-            requires_grad=self.requires_grad or other.requires_grad,
-            _children=(self, other),
-            _op="sub",
-        )
-        _propagate_hard(out, (self, other), lambda lhs, rhs: lhs - rhs)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad += out.grad
             if other.requires_grad:
                 other.grad -= out.grad
 
-        out._backward = _backward
-        _record_op("sub", (self, other), out, {"dout/dlhs": 1.0, "dout/drhs": -1.0})
-        return out
+        return _binary_op(
+            self,
+            other,
+            op_name="sub",
+            soft_value=self.data - other.data,
+            hard_fn=lambda lhs, rhs: lhs - rhs,
+            local_derivative={"dout/dlhs": 1.0, "dout/drhs": -1.0},
+            accumulate=accumulate,
+        )
 
     def __rsub__(self, other: Any) -> "Tensor":
         return ensure_tensor(other) - self
 
     def __neg__(self) -> "Tensor":
-        out = Tensor(
-            -self.data,
-            requires_grad=self.requires_grad,
-            _children=(self,),
-            _op="neg",
-        )
-        _propagate_hard(out, (self,), lambda value: -value)
-
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad -= out.grad
 
-        out._backward = _backward
-        _record_op("neg", (self,), out, {"dout/dx": -1.0})
-        return out
+        return _unary_op(
+            self,
+            op_name="neg",
+            soft_value=-self.data,
+            hard_fn=lambda value: -value,
+            local_derivative={"dout/dx": -1.0},
+            accumulate=accumulate,
+        )
 
     def __mul__(self, other: Any) -> "Tensor":
         other = ensure_tensor(other)
-        out = Tensor(
-            self.data * other.data,
-            requires_grad=self.requires_grad or other.requires_grad,
-            _children=(self, other),
-            _op="mul",
-        )
-        _propagate_hard(out, (self, other), lambda lhs, rhs: lhs * rhs)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad += other.data * out.grad
             if other.requires_grad:
                 other.grad += self.data * out.grad
 
-        out._backward = _backward
-        _record_op(
-            "mul",
-            (self, other),
-            out,
-            {"dout/dlhs": other.data, "dout/drhs": self.data},
+        return _binary_op(
+            self,
+            other,
+            op_name="mul",
+            soft_value=self.data * other.data,
+            hard_fn=lambda lhs, rhs: lhs * rhs,
+            local_derivative={"dout/dlhs": other.data, "dout/drhs": self.data},
+            accumulate=accumulate,
         )
-        return out
 
     def __rmul__(self, other: Any) -> "Tensor":
         return self * other
@@ -240,28 +272,25 @@ class Tensor:
         other = ensure_tensor(other)
         if other.data == 0.0:
             raise ZeroDivisionError("division by zero in Tensor")
-        out = Tensor(
-            self.data / other.data,
-            requires_grad=self.requires_grad or other.requires_grad,
-            _children=(self, other),
-            _op="div",
-        )
-        _propagate_hard(out, (self, other), lambda lhs, rhs: lhs / rhs)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad += (1.0 / other.data) * out.grad
             if other.requires_grad:
                 other.grad -= (self.data / (other.data * other.data)) * out.grad
 
-        out._backward = _backward
-        _record_op(
-            "div",
-            (self, other),
-            out,
-            {"dout/dlhs": 1.0 / other.data, "dout/drhs": -self.data / (other.data**2)},
+        return _binary_op(
+            self,
+            other,
+            op_name="div",
+            soft_value=self.data / other.data,
+            hard_fn=lambda lhs, rhs: lhs / rhs,
+            local_derivative={
+                "dout/dlhs": 1.0 / other.data,
+                "dout/drhs": -self.data / (other.data**2),
+            },
+            accumulate=accumulate,
         )
-        return out
 
     def __rtruediv__(self, other: Any) -> "Tensor":
         return ensure_tensor(other) / self
@@ -278,115 +307,119 @@ class Tensor:
         if isinstance(value, complex):
             raise ValueError("Tensor power must stay in the real number domain")
 
-        out = Tensor(
-            value,
-            requires_grad=self.requires_grad or power_t.requires_grad,
-            _children=(self, power_t),
-            _op="pow",
+        if self.data == 0.0 and power_t.data == 0.0:
+            base_derivative: float | str = 0.0
+        elif self.data == 0.0 and power_t.data < 1.0:
+            base_derivative = "undefined"
+        else:
+            base_derivative = power_t.data * (self.data ** (power_t.data - 1.0))
+        exponent_derivative: float | str = (
+            value * math.log(self.data) if self.data > 0.0 else "undefined"
         )
-        _propagate_hard(out, (self, power_t), lambda base, exponent: base**exponent)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 if self.data == 0.0 and power_t.data < 1.0 and power_t.data != 0.0:
                     raise ValueError("undefined derivative for zero base and power < 1")
-                derivative = (
-                    0.0
-                    if self.data == 0.0 and power_t.data == 0.0
-                    else power_t.data * (self.data ** (power_t.data - 1.0))
-                )
+                derivative = 0.0 if base_derivative == "undefined" else float(base_derivative)
                 self.grad += derivative * out.grad
             if power_t.requires_grad:
-                power_t.grad += out.data * math.log(self.data) * out.grad
+                power_t.grad += float(exponent_derivative) * out.grad
 
-        out._backward = _backward
-        _record_op(
-            "pow",
-            (self, power_t),
-            out,
-            {
-                "dout/dbase": (
-                    0.0
-                    if self.data == 0.0 and power_t.data == 0.0
-                    else power_t.data * (self.data ** (power_t.data - 1.0))
-                    if not (self.data == 0.0 and power_t.data < 1.0)
-                    else "undefined"
-                ),
-                "dout/dexponent": out.data * math.log(self.data) if self.data > 0.0 else "undefined",
+        return _binary_op(
+            self,
+            power_t,
+            op_name="pow",
+            soft_value=value,
+            hard_fn=lambda base, exponent: base**exponent,
+            local_derivative={
+                "dout/dbase": base_derivative,
+                "dout/dexponent": exponent_derivative,
             },
+            accumulate=accumulate,
         )
-        return out
 
     def __rpow__(self, other: Any) -> "Tensor":
         return ensure_tensor(other) ** self
 
     def exp(self) -> "Tensor":
         value = math.exp(self.data)
-        out = Tensor(value, requires_grad=self.requires_grad, _children=(self,), _op="exp")
-        _propagate_hard(out, (self,), math.exp)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad += value * out.grad
 
-        out._backward = _backward
-        _record_op("exp", (self,), out, {"dout/dx": value})
-        return out
+        return _unary_op(
+            self,
+            op_name="exp",
+            soft_value=value,
+            hard_fn=math.exp,
+            local_derivative={"dout/dx": value},
+            accumulate=accumulate,
+        )
 
     def log(self) -> "Tensor":
         if self.data <= 0.0:
             raise ValueError("log is only defined for positive Tensor values")
-        out = Tensor(
-            math.log(self.data),
-            requires_grad=self.requires_grad,
-            _children=(self,),
-            _op="log",
-        )
-        _propagate_hard(out, (self,), math.log)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad += (1.0 / self.data) * out.grad
 
-        out._backward = _backward
-        _record_op("log", (self,), out, {"dout/dx": 1.0 / self.data})
-        return out
+        return _unary_op(
+            self,
+            op_name="log",
+            soft_value=math.log(self.data),
+            hard_fn=math.log,
+            local_derivative={"dout/dx": 1.0 / self.data},
+            accumulate=accumulate,
+        )
 
     def tanh(self) -> "Tensor":
         value = math.tanh(self.data)
-        out = Tensor(value, requires_grad=self.requires_grad, _children=(self,), _op="tanh")
-        _propagate_hard(out, (self,), math.tanh)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad += (1.0 - value * value) * out.grad
 
-        out._backward = _backward
-        _record_op("tanh", (self,), out, {"dout/dx": 1.0 - value * value})
-        return out
+        return _unary_op(
+            self,
+            op_name="tanh",
+            soft_value=value,
+            hard_fn=math.tanh,
+            local_derivative={"dout/dx": 1.0 - value * value},
+            accumulate=accumulate,
+        )
 
     def sigmoid(self) -> "Tensor":
         value = _stable_sigmoid(self.data)
-        out = Tensor(value, requires_grad=self.requires_grad, _children=(self,), _op="sigmoid")
-        _propagate_hard(out, (self,), _stable_sigmoid)
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
                 self.grad += value * (1.0 - value) * out.grad
 
-        out._backward = _backward
-        _record_op("sigmoid", (self,), out, {"dout/dx": value * (1.0 - value)})
-        return out
+        return _unary_op(
+            self,
+            op_name="sigmoid",
+            soft_value=value,
+            hard_fn=_stable_sigmoid,
+            local_derivative={"dout/dx": value * (1.0 - value)},
+            accumulate=accumulate,
+        )
 
     def relu(self) -> "Tensor":
         value = self.data if self.data > 0.0 else 0.0
-        out = Tensor(value, requires_grad=self.requires_grad, _children=(self,), _op="relu")
-        _propagate_hard(out, (self,), lambda hard_value: max(0.0, hard_value))
+        local = 1.0 if self.data > 0.0 else 0.0
 
-        def _backward() -> None:
+        def accumulate(out: Tensor) -> None:
             if self.requires_grad:
-                self.grad += (1.0 if self.data > 0.0 else 0.0) * out.grad
+                self.grad += local * out.grad
 
-        out._backward = _backward
-        _record_op("relu", (self,), out, {"dout/dx": 1.0 if self.data > 0.0 else 0.0})
-        return out
+        return _unary_op(
+            self,
+            op_name="relu",
+            soft_value=value,
+            hard_fn=lambda hard_value: max(0.0, hard_value),
+            local_derivative={"dout/dx": local},
+            accumulate=accumulate,
+        )

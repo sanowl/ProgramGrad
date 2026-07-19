@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from programgrad import Tensor, gradcheck, soft_if
+from programgrad import Tensor, bounded_loop, gradcheck, soft_if, soft_select
 
 
 class GradcheckTests(unittest.TestCase):
@@ -16,12 +16,43 @@ class GradcheckTests(unittest.TestCase):
         result = gradcheck(fn, [0.7, 1.1])
         self.assertTrue(result.passed, result)
 
+    def test_soft_select_softmax_gradcheck(self):
+        def fn(score_a: Tensor, score_b: Tensor) -> Tensor:
+            return soft_select([1.0, 3.0], [score_a, score_b], mode="softmax", tau=1.0)
+
+        result = gradcheck(fn, [0.2, 0.8])
+        self.assertTrue(result.passed, result)
+
+    def test_bounded_loop_survival_gradcheck(self):
+        def fn(initial: Tensor) -> Tensor:
+            return bounded_loop(
+                initial,
+                3,
+                lambda _index, state: state + 0.5,
+                lambda index, _state: 1.0 if index < 2 else -1.0,
+                beta=5.0,
+                mode="survival",
+            )
+
+        result = gradcheck(fn, [0.0])
+        self.assertTrue(result.passed, result)
+
     def test_gradcheck_validates_numeric_configuration(self):
-        for kwargs in ({"eps": 0.0}, {"eps": math.inf}, {"atol": -1.0}, {"rtol": math.nan}):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
-                gradcheck(lambda x: x**2, [1.0], **kwargs)
-        with self.assertRaisesRegex(ValueError, "inputs must contain only finite"):
-            gradcheck(lambda x: x**2, [math.inf])
+        cases = [
+            ({"eps": 0.0}, [1.0], ValueError, None),
+            ({"eps": math.inf}, [1.0], ValueError, None),
+            ({"atol": -1.0}, [1.0], ValueError, None),
+            ({"rtol": math.nan}, [1.0], ValueError, None),
+            ({}, [math.inf], ValueError, "inputs must contain only finite"),
+        ]
+        for kwargs, inputs, error, match in cases:
+            with self.subTest(kwargs=kwargs, inputs=inputs):
+                if match is None:
+                    with self.assertRaises(error):
+                        gradcheck(lambda x: x**2, inputs, **kwargs)
+                else:
+                    with self.assertRaisesRegex(error, match):
+                        gradcheck(lambda x: x**2, inputs, **kwargs)
 
     def test_gradcheck_checks_perturbed_return_types(self):
         calls = 0

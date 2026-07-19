@@ -8,11 +8,11 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
 from .fidelity import scalar_gap, summarize_final_loop
+from .ir import FidelityMetrics
 from .relaxations import validate_temperature
 from .tensor import Tensor, ensure_tensor, hard_data
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .ir import FidelityMetrics
     from .trace import TraceContext
 
 
@@ -185,28 +185,25 @@ def hard_soft_rows(trace: "TraceContext", *, target: float | None = None) -> lis
         )
     loop_summary = summarize_final_loop(trace.loops, include_metrics=trace.fidelity)
     if loop_summary is not None:
-        hard_loss = (
-            squared_loss(loop_summary.hard_value, target) if target is not None else None
-        )
-        soft_loss = (
-            squared_loss(loop_summary.soft_value, target) if target is not None else None
-        )
+        metrics = None
+        if trace.fidelity:
+            metrics = FidelityMetrics(
+                hard_value=loop_summary.hard_value,
+                soft_value=loop_summary.soft_value,
+                output_gap=loop_summary.output_gap,
+                path_agreement=None,
+                gate_entropy=loop_summary.gate_entropy,
+                temperature=None,
+            )
         indexed_rows.append(
-            (
-                loop_summary.event_id,
-                EvaluationRow(
-                    name=f"loop#{loop_summary.event_id}:final",
-                    kind="loop",
-                    hard_value=loop_summary.hard_value,
-                    soft_value=loop_summary.soft_value,
-                    output_gap=loop_summary.output_gap,
-                    target=target,
-                    hard_loss=hard_loss,
-                    soft_loss=soft_loss,
-                    path_agreement=None,
-                    entropy=loop_summary.gate_entropy,
-                    temperature=None,
-                ),
+            _event_row(
+                event_id=loop_summary.event_id,
+                name=f"loop#{loop_summary.event_id}:final",
+                kind="loop",
+                hard_value=loop_summary.hard_value,
+                soft_value=loop_summary.soft_value,
+                metrics=metrics,
+                target=target,
             )
         )
     indexed_rows.sort(key=lambda item: item[0])
@@ -285,9 +282,10 @@ def _match_fidelity(
 ) -> "FidelityMetrics | None":
     if trace_obj is None:
         return None
+    events = _fidelity_events(trace_obj)
     matches = [
         metrics
-        for metrics in _fidelity_events(trace_obj)
+        for metrics in events
         if metrics.soft_value is not None
         and math.isclose(metrics.soft_value, soft_value, rel_tol=0.0, abs_tol=1e-9)
     ]
@@ -299,7 +297,19 @@ def _match_fidelity(
         ]
         if hard_matches:
             matches = hard_matches
-    return matches[-1] if matches else None
+    if matches:
+        return matches[-1]
+    # Straight-through / hard-forward tensors have soft_value != .data; fall back
+    # to matching the hard program value alone.
+    if hard_value is not None:
+        hard_only = [
+            metrics
+            for metrics in events
+            if math.isclose(metrics.hard_value, hard_value, rel_tol=0.0, abs_tol=1e-9)
+        ]
+        if hard_only:
+            return hard_only[-1]
+    return None
 
 
 def temperature_sensitivity(
@@ -311,9 +321,11 @@ def temperature_sensitivity(
     """Evaluate a relaxation across beta/tau values.
 
     ``run_fn`` receives a temperature and returns either a ``Tensor`` or a tuple
-    containing a ``Tensor`` and optionally a ``TraceContext``. Soft/hard values
-    come from the returned tensor; fidelity entropy/agreement are taken only from
-    a matching trace event when one exists.
+    containing a ``Tensor`` and optionally a ``TraceContext``. Hard values come
+    from the returned tensor; soft values prefer a matched fidelity event when
+    one exists (important for straight-through modes where ``tensor.data`` is
+    the hard forward value). Without a trace, STE rows report hard-forward
+    ``.data`` as ``soft_value``.
     """
 
     rows: list[TemperatureSensitivityRow] = []
@@ -329,14 +341,19 @@ def temperature_sensitivity(
         )
         if hard_value is None and matched is not None:
             hard_value = matched.hard_value
-        gap = scalar_gap(hard_value, tensor.data) if hard_value is not None else None
+        soft_value = (
+            matched.soft_value
+            if matched is not None and matched.soft_value is not None
+            else tensor.data
+        )
+        gap = scalar_gap(hard_value, soft_value) if hard_value is not None else None
         if matched is not None and matched.output_gap is not None:
             gap = matched.output_gap
-        loss = squared_loss(tensor.data, target) if target is not None else None
+        loss = squared_loss(soft_value, target) if target is not None else None
         rows.append(
             TemperatureSensitivityRow(
                 temperature=temperature,
-                soft_value=tensor.data,
+                soft_value=soft_value,
                 hard_value=hard_value,
                 output_gap=gap,
                 entropy=None if matched is None else matched.gate_entropy,

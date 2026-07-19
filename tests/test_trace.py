@@ -10,16 +10,22 @@ from programgrad.trace import hard_shadow_enabled, ops_recording_enabled
 
 class TraceTests(unittest.TestCase):
     def test_trace_configuration_is_validated(self):
-        with self.assertRaisesRegex(TypeError, "mode must be a string"):
-            trace(mode=1)
-        with self.assertRaisesRegex(ValueError, "relaxation must not be empty"):
-            trace(relaxation="  ")
-        with self.assertRaisesRegex(TypeError, "fidelity must be a bool"):
-            trace(fidelity="yes")
-        with self.assertRaisesRegex(TypeError, "record_ops must be a bool"):
-            trace(record_ops=1)
-        with self.assertRaisesRegex(TypeError, "hard_shadow must be a bool"):
-            trace(hard_shadow=1)
+        cases = [
+            (lambda: trace(mode=1), TypeError, "mode must be a string"),
+            (lambda: trace(relaxation="  "), ValueError, "relaxation must not be empty"),
+            (lambda: trace(fidelity="yes"), TypeError, "fidelity must be a bool"),
+            (lambda: trace(record_ops=1), TypeError, "record_ops must be a bool"),
+            (lambda: trace(hard_shadow=1), TypeError, "hard_shadow must be a bool"),
+            (
+                lambda: trace(fidelity=True, hard_shadow=False),
+                ValueError,
+                "fidelity=True requires hard_shadow=True",
+            ),
+        ]
+        for call, error, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(error, message):
+                call()
+
         with self.assertRaisesRegex(TypeError, "hard_shadow must be a bool"):
             with training_mode(hard_shadow=1):
                 pass

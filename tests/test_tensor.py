@@ -73,16 +73,20 @@ class TensorTests(unittest.TestCase):
         self.assertAlmostEqual(quotient.data, 0.5)
         self.assertIsNone(quotient.hard_value)
         self.assertIn("ZeroDivisionError", quotient.hard_error)
-        with self.assertRaisesRegex(ValueError, "hard-program value is unavailable"):
-            hard_data(quotient)
-        with self.assertRaisesRegex(ValueError, "hard-program value is unavailable"):
-            hard_data(quotient.detach())
+        for value in (quotient, quotient.detach()):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "hard-program value is unavailable"):
+                    hard_data(value)
 
     def test_power_reports_real_domain_errors_clearly(self):
-        with self.assertRaisesRegex(ValueError, "real number domain"):
-            Tensor(-1.0) ** 0.5
-        with self.assertRaisesRegex(ZeroDivisionError, "negative power"):
-            Tensor(0.0) ** -1.0
+        cases = [
+            (lambda: Tensor(-1.0) ** 0.5, ValueError, "real number domain"),
+            (lambda: Tensor(0.0) ** -1.0, ZeroDivisionError, "negative power"),
+        ]
+        for action, error, match in cases:
+            with self.subTest(match=match):
+                with self.assertRaisesRegex(error, match):
+                    action()
 
 
 if __name__ == "__main__":

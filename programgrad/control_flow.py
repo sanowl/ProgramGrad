@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from operator import index as integer_index
+
+from typing import Literal
 
 from .fidelity import binary_entropy, categorical_entropy, path_agrees, scalar_gap
 from .ir import BranchNode, ConditionNode, FidelityMetrics, LedgerEntry, LoopFrame, RelaxationSpec, SearchNode
@@ -20,6 +23,62 @@ from .tensor import Tensor, ensure_tensor, hard_data
 from .trace import current_trace, in_soft_only, soft_only_region
 
 BranchValue = Tensor | float | Callable[[], Tensor | float]
+BranchPath = Literal["true", "false"]
+
+
+@dataclass(frozen=True)
+class _SelectModeSpec:
+    surrogate_type: str
+    estimator: str
+    notes: str
+    gradient_contract: str
+    bias_warning: str
+
+
+_SELECT_MODES: dict[str, _SelectModeSpec] = {
+    "softmax": _SelectModeSpec(
+        surrogate_type="softmax_select",
+        estimator="surrogate",
+        notes="Hard argmax is paired with softmax-weighted candidate values.",
+        gradient_contract=(
+            "Forward surrogate is the softmax-weighted expected value; "
+            "gradients flow into candidate values and selection scores."
+        ),
+        bias_warning=(
+            "The gradient optimizes the soft expected value, so the learned "
+            "scores must still be evaluated with the original hard argmax."
+        ),
+    ),
+    "gumbel": _SelectModeSpec(
+        surrogate_type="gumbel_softmax_select",
+        estimator="surrogate",
+        notes="Hard argmax is paired with a Concrete / Gumbel-Softmax mixture.",
+        gradient_contract=(
+            "Forward surrogate is the Gumbel-Softmax expected value; "
+            "gradients flow into candidate values and selection scores."
+        ),
+        bias_warning=(
+            "Gumbel-Softmax optimizes a noisy Concrete relaxation; evaluate the "
+            "learned scores with the original hard argmax."
+        ),
+    ),
+    "gumbel_st": _SelectModeSpec(
+        surrogate_type="gumbel_straight_through_select",
+        estimator="hard-forward-soft-backward",
+        notes=(
+            "Hard program argmax is traced separately from the Gumbel sample used "
+            "in the straight-through forward pass."
+        ),
+        gradient_contract=(
+            "Forward pass uses a hard Gumbel sample; backward pass uses the "
+            "Concrete / Gumbel-Softmax surrogate gradient."
+        ),
+        bias_warning=(
+            "Straight-through Gumbel gradients are biased estimators; always "
+            "check the hard argmax objective after training."
+        ),
+    ),
+}
 
 
 def _resolve_branch_value(value: BranchValue) -> Tensor:
@@ -39,9 +98,12 @@ def _evaluate_both_branches(
         true_t = _resolve_branch_value(true_value)
         with soft_only_region():
             false_t = _resolve_branch_value(false_value)
+            # Soft-only results must not poison the hard-path mixture metadata.
+            _clear_hard(false_t)
     else:
         with soft_only_region():
             true_t = _resolve_branch_value(true_value)
+            _clear_hard(true_t)
         false_t = _resolve_branch_value(false_value)
     return true_t, false_t
 
@@ -58,6 +120,21 @@ def _attach_hard(output: Tensor, hard_value: float) -> float:
     return hard_value
 
 
+def _clear_hard(output: Tensor) -> None:
+    output.hard_value = None
+    output.hard_error = None
+
+
+def _decision_score(score: Tensor, *, require_hard: bool) -> float:
+    """Score used for hard-path decisions; soft-only paths use ``.data``."""
+
+    return hard_data(score) if require_hard else score.data
+
+
+def _gated_mixture(gate: Tensor, true_value: Tensor, false_value: Tensor) -> Tensor:
+    return gate * true_value + (1.0 - gate) * false_value
+
+
 def _require_finite_score(
     score: Tensor,
     *,
@@ -68,17 +145,17 @@ def _require_finite_score(
 
     if not math.isfinite(score.data):
         raise ValueError(f"{name} must be finite")
-    hard_score = hard_data(score) if require_hard else score.data
-    if require_hard and not math.isfinite(hard_score):
+    decision = _decision_score(score, require_hard=require_hard)
+    if require_hard and not math.isfinite(decision):
         raise ValueError(f"{name} hard value must be finite")
-    return hard_score
+    return decision
 
 
 def _record_branch(
     *,
     score: Tensor,
     hard_score: float,
-    selected_path: str,
+    selected_path: BranchPath,
     output_hard: float,
     output_soft: float | None,
     gate: float | None,
@@ -128,7 +205,7 @@ def _record_branch(
     branch = BranchNode(
         id=event_id,
         condition=condition,
-        selected_path="true" if selected_path == "true" else "false",
+        selected_path=selected_path,
         output_hard=output_hard,
         output_soft=output_soft,
         fidelity=metrics,
@@ -238,14 +315,17 @@ def soft_if(
 
     score_t = ensure_tensor(score)
     beta = validate_temperature(beta, name="beta")
-    hard_score = _require_finite_score(score_t)
+    hard_score = _require_finite_score(score_t, require_hard=not in_soft_only())
     hard_true = hard_score > 0.0
     true_t, false_t = _evaluate_both_branches(hard_true, true_value, false_value)
     gate = sigmoid_gate(score_t, beta=beta)
-    out = gate * true_t + (1.0 - gate) * false_t
+    out = _gated_mixture(gate, true_t, false_t)
 
     hard_out = true_t if hard_true else false_t
-    hard_out_value = _attach_hard(out, hard_data(hard_out))
+    if in_soft_only():
+        hard_out_value = hard_out.data
+    else:
+        hard_out_value = _attach_hard(out, hard_data(hard_out))
     _record_branch(
         score=score_t,
         hard_score=hard_score,
@@ -296,12 +376,16 @@ def diff_if(
         raise ValueError("mode must be one of: pathwise, soft, straight_through")
 
     score_t = ensure_tensor(score)
-    hard_score = _require_finite_score(score_t)
+    on_hard_path = not in_soft_only()
+    hard_score = _require_finite_score(score_t, require_hard=on_hard_path)
     hard_true = hard_score > 0.0
 
     if mode == "pathwise":
         out = _resolve_branch_value(true_fn if hard_true else false_fn)
-        hard_out_value = _attach_hard(out, hard_data(out))
+        if on_hard_path:
+            hard_out_value = _attach_hard(out, hard_data(out))
+        else:
+            hard_out_value = out.data
         _record_branch(
             score=score_t,
             hard_score=hard_score,
@@ -332,10 +416,13 @@ def diff_if(
     beta = validate_temperature(beta, name="beta")
     true_t, false_t = _evaluate_both_branches(hard_true, true_fn, false_fn)
     gate, soft_gate = straight_through_gates(score_t, beta=beta)
-    out = gate * true_t + (1.0 - gate) * false_t
-    soft_out = soft_gate * true_t + (1.0 - soft_gate) * false_t
+    out = _gated_mixture(gate, true_t, false_t)
+    soft_out = _gated_mixture(soft_gate, true_t, false_t)
     hard_out = true_t if hard_true else false_t
-    hard_out_value = _attach_hard(out, hard_data(hard_out))
+    if on_hard_path:
+        hard_out_value = _attach_hard(out, hard_data(hard_out))
+    else:
+        hard_out_value = hard_out.data
     _record_branch(
         score=score_t,
         hard_score=hard_score,
@@ -363,7 +450,11 @@ def diff_if(
 
 
 def soft_argmax(scores: Sequence[Tensor | float], *, tau: float = 1.0) -> list[Tensor]:
-    """Return softmax weights for differentiable candidate selection."""
+    """Return softmax weights for differentiable candidate selection.
+
+    This is an untraced building block. Prefer ``soft_select`` when you need a
+    hard argmax paired with ledger / fidelity metadata.
+    """
 
     return softmax(list(scores), tau=tau)
 
@@ -385,7 +476,8 @@ def soft_select(
       - ``gumbel_st``: hard Gumbel sample forward, soft Concrete backward
     """
 
-    if mode not in {"softmax", "gumbel", "gumbel_st"}:
+    spec = _SELECT_MODES.get(mode)
+    if spec is None:
         raise ValueError("mode must be one of: softmax, gumbel, gumbel_st")
     if len(values) != len(scores):
         raise ValueError("values and scores must have the same length")
@@ -407,73 +499,47 @@ def soft_select(
     if mode == "softmax":
         mix_weights = softmax(score_tensors, tau=tau)
         report_weights = mix_weights
-        surrogate_type = "softmax_select"
-        estimator = "surrogate"
-        notes = "Hard argmax is paired with softmax-weighted candidate values."
-        gradient_contract = (
-            "Forward surrogate is the softmax-weighted expected value; "
-            "gradients flow into candidate values and selection scores."
-        )
-        bias_warning = (
-            "The gradient optimizes the soft expected value, so the learned "
-            "scores must still be evaluated with the original hard argmax."
-        )
     elif mode == "gumbel":
         mix_weights = gumbel_softmax(score_tensors, tau=tau, seed=seed)
         report_weights = mix_weights
-        surrogate_type = "gumbel_softmax_select"
-        estimator = "surrogate"
-        notes = "Hard argmax is paired with a Concrete / Gumbel-Softmax mixture."
-        gradient_contract = (
-            "Forward surrogate is the Gumbel-Softmax expected value; "
-            "gradients flow into candidate values and selection scores."
-        )
-        bias_warning = (
-            "Gumbel-Softmax optimizes a noisy Concrete relaxation; evaluate the "
-            "learned scores with the original hard argmax."
-        )
     else:
         mix_weights, report_weights, _sampled = gumbel_softmax_straight_through(
             score_tensors,
             tau=tau,
             seed=seed,
         )
-        surrogate_type = "gumbel_straight_through_select"
-        estimator = "hard-forward-soft-backward"
-        notes = (
-            "Hard program argmax is traced separately from the Gumbel sample used "
-            "in the straight-through forward pass."
-        )
-        gradient_contract = (
-            "Forward pass uses a hard Gumbel sample; backward pass uses the "
-            "Concrete / Gumbel-Softmax surrogate gradient."
-        )
-        bias_warning = (
-            "Straight-through Gumbel gradients are biased estimators; always "
-            "check the hard argmax objective after training."
-        )
 
     out = Tensor(0.0)
     for weight, value in zip(mix_weights, value_tensors):
         out = out + weight * value
 
-    hard_scores = [hard_data(score) for score in score_tensors]
-    hard_index = max(range(len(score_tensors)), key=hard_scores.__getitem__)
-    hard_out_value = _attach_hard(out, hard_data(value_tensors[hard_index]))
+    soft_scores = [score.data for score in score_tensors]
+    if in_soft_only():
+        for score in soft_scores:
+            if not math.isfinite(score):
+                raise ValueError("soft_select scores must be finite")
+        hard_scores = soft_scores
+        hard_index = max(range(len(score_tensors)), key=soft_scores.__getitem__)
+        hard_out_value = value_tensors[hard_index].data
+        _clear_hard(out)
+    else:
+        hard_scores = [hard_data(score) for score in score_tensors]
+        hard_index = max(range(len(score_tensors)), key=hard_scores.__getitem__)
+        hard_out_value = _attach_hard(out, hard_data(value_tensors[hard_index]))
     _record_search(
         names=names,
         hard_scores=hard_scores,
-        soft_scores=[score.data for score in score_tensors],
+        soft_scores=soft_scores,
         hard_index=hard_index,
         soft_weights=[weight.data for weight in report_weights],
         output_hard=hard_out_value,
         output_soft=out.data,
         tau=tau,
-        surrogate_type=surrogate_type,
-        estimator=estimator,
-        notes=notes,
-        gradient_contract=gradient_contract,
-        bias_warning=bias_warning,
+        surrogate_type=spec.surrogate_type,
+        estimator=spec.estimator,
+        notes=spec.notes,
+        gradient_contract=spec.gradient_contract,
+        bias_warning=spec.bias_warning,
     )
     return out
 
@@ -492,6 +558,25 @@ def _loop_body_hard_value(candidate: Tensor, *, state: Tensor) -> float:
         "program was still alive; return Tensor results from Tensor ops "
         "(avoid reading .data inside the body)."
     )
+
+
+def _validate_bounded_loop_args(
+    steps: int,
+    *,
+    mode: str,
+    beta: float,
+) -> tuple[int, float]:
+    if mode not in {"survival", "exit_distribution"}:
+        raise ValueError("mode must be one of: survival, exit_distribution")
+    if isinstance(steps, bool):
+        raise TypeError("steps must be an integer, not bool")
+    try:
+        step_count = integer_index(steps)
+    except TypeError:
+        raise TypeError("steps must be an integer") from None
+    if step_count < 0:
+        raise ValueError("steps must be non-negative")
+    return step_count, validate_temperature(beta, name="beta")
 
 
 def bounded_loop(
@@ -517,17 +602,7 @@ def bounded_loop(
     that preserves ``hard_value`` (use Tensor ops; do not escape via ``.data``).
     """
 
-    if mode not in {"survival", "exit_distribution"}:
-        raise ValueError("mode must be one of: survival, exit_distribution")
-    if isinstance(steps, bool):
-        raise TypeError("steps must be an integer, not bool")
-    try:
-        step_count = integer_index(steps)
-    except TypeError:
-        raise TypeError("steps must be an integer") from None
-    if step_count < 0:
-        raise ValueError("steps must be non-negative")
-    beta = validate_temperature(beta, name="beta")
+    step_count, beta = _validate_bounded_loop_args(steps, mode=mode, beta=beta)
 
     state = ensure_tensor(init_state)
     alive = Tensor(1.0)
@@ -578,9 +653,9 @@ def bounded_loop(
         if hard_alive:
             _attach_hard(state, hard_state)
         else:
-            state.hard_value = None
-            state.hard_error = None
+            _clear_hard(state)
         if tr is not None:
+            output_soft = soft_out.data if mode == "exit_distribution" else state.data
             tr.record_loop(
                 LoopFrame(
                     id=tr.next_id(),
@@ -592,14 +667,12 @@ def bounded_loop(
                     hard_continue_score=hard_continue_score,
                     hard_alive=hard_alive,
                     on_hard_path=decision_on_hard_path,
+                    output_soft=output_soft,
                 )
             )
 
     if mode == "exit_distribution":
-        if step_count == 0:
-            result = state
-        else:
-            result = soft_out
+        result = state if step_count == 0 else soft_out
         _attach_hard(result, hard_state)
         return result
 

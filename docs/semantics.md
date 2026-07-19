@@ -51,6 +51,10 @@ reported as a biased estimator in the ledger.
 In all modes the traced hard program remains argmax over hard scores. Soft
 weights are what training sees.
 
+`soft_argmax` is a low-level, untraced helper that returns softmax weights only.
+It does not write search/ledger/fidelity events; use `soft_select` when you need
+a traced hard argmax paired with a soft surrogate.
+
 ## Hybrid training objective
 
 `hybrid_loss(result, target, gap_weight=1.0)` optimizes
@@ -68,12 +72,15 @@ Every relaxed control-flow output carries its original hard-program value as a
 shadow alongside the differentiable soft value. Deterministic tensor operations
 propagate both values. If the hard shadow leaves the real domain while the soft
 path remains valid, the soft result stays available and the tensor retains a
-deferred hard error. A later hard branch or argmax raises that error instead of
-silently substituting the soft value. Valid hard decisions still consult the
-hard shadow while gates and softmax weights use the soft score. Traces record
-both scores so path disagreement remains visible. Nested decisions evaluated
-only to build an unselected soft branch are marked `on_hard_path=False` and are
-omitted from `hard_path` / hard-vs-soft evaluation rows.
+deferred hard error. Read that value with `hard_data(...)`: it raises when a
+deferred hard error is present instead of silently substituting the soft value.
+Valid hard decisions still consult the hard shadow while gates and softmax
+weights use the soft score. Traces record both scores so path disagreement
+remains visible. Nested decisions evaluated only to build an unselected soft
+branch are marked `on_hard_path=False` and are omitted from `hard_path` /
+hard-vs-soft evaluation rows. Those soft-only nested decisions use soft scores
+for local metadata and must not abort a valid surrogate forward when a deferred
+hard error sits on an off-path score.
 
 ## Bounded loops
 
@@ -89,7 +96,10 @@ hard shadow, the body must keep returning `Tensor` values that preserve
 `hard_value` (do not escape through `.data`). This is still a controlled
 relaxation rather than general Python loop differentiation.
 Loop frames expose hard continue/stop decisions and hard/soft carried state in
-JSON, text, hard-path, and SVG trace views.
+JSON, text, hard-path, and SVG trace views. Fidelity / `hard_soft_rows` compare
+the frozen hard state against the loop's returned soft value (`output_soft`):
+for `survival` that matches the carried state; for `exit_distribution` it is the
+exit-mass mixture, not the internal survival-carried state bodies still see.
 
 ## Fidelity
 
@@ -116,7 +126,10 @@ with training_mode(hard_shadow=False):
 `training_mode(hard_shadow=False)` skips hard-shadow propagation so only the soft
 surrogate graph is built. Re-enable a full `trace(fidelity=True)` (or
 `training_trace(...)` for a light decision log) when you need hard-path reports.
-Nested hard-shadow semantics require `hard_shadow=True`.
+Nested hard-shadow semantics require `hard_shadow=True`. Note the default
+asymmetry: `training_mode` defaults to `hard_shadow=False` (cheap soft steps),
+while `training_trace` defaults to `hard_shadow=True` (decision fidelity).
+`fidelity=True` also requires `hard_shadow=True`.
 
 ## Semantic ledger
 
@@ -136,4 +149,8 @@ This makes the gradient contract inspectable instead of implicit in the code.
 The same hard program can behave differently as beta or tau changes. ProgramGrad
 therefore includes a lightweight temperature sensitivity report. A strong demo
 should show not only that the soft loss decreased, but also how hard-soft gap,
-entropy, and agreement behave across a small temperature sweep.
+entropy, and agreement behave across a small temperature sweep. When the run
+returns a trace, soft values prefer the matched fidelity event (so
+straight-through / `gumbel_st` rows report the surrogate soft value, not the
+hard-forward `.data`). Without a trace, STE rows fall back to hard-forward
+`.data` as `soft_value`.

@@ -34,6 +34,8 @@ def _fmt_optional(value: float | None, *, digits: str = ".4g") -> str:
 
 
 def export_svg(trace: "TraceContext", path: str | Path) -> Path:
+    from .fidelity import loop_decision_label
+
     rows: list[tuple[str, list[str], str]] = []
     for branch in trace.branches:
         gate = branch.condition.gate
@@ -70,10 +72,7 @@ def export_svg(trace: "TraceContext", path: str | Path) -> Path:
             )
         )
     for loop in trace.loops:
-        if loop.hard_continue_score is None:
-            decision = "soft-unroll"
-        else:
-            decision = "continue" if loop.hard_alive else "stop"
+        decision = loop_decision_label(loop)
         rows.append(
             (
                 f"Loop #{loop.id}: iteration {loop.iteration_index}",

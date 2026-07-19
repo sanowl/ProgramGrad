@@ -57,6 +57,20 @@ def soft_only_region() -> Iterator[None]:
         _SOFT_ONLY_DEPTH.reset(token)
 
 
+def _require_nonempty_str(value: object, *, name: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{name} must not be empty")
+    return value
+
+
+def _require_bool(value: object, *, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError(f"{name} must be a bool")
+    return value
+
+
 @contextmanager
 def training_mode(*, hard_shadow: bool = False) -> Iterator[None]:
     """Cheap context for optimization loops.
@@ -65,8 +79,7 @@ def training_mode(*, hard_shadow: bool = False) -> Iterator[None]:
     ``trace(...)`` or ``training_trace()`` when you need decision fidelity.
     """
 
-    if not isinstance(hard_shadow, bool):
-        raise TypeError("hard_shadow must be a bool")
+    hard_shadow = _require_bool(hard_shadow, name="hard_shadow")
     ops_token = _RECORD_OPS_ACTIVE.set(False)
     hard_token = _HARD_SHADOW_ACTIVE.set(hard_shadow)
     try:
@@ -124,25 +137,16 @@ class TraceContext:
         record_ops: bool = False,
         hard_shadow: bool = True,
     ) -> None:
-        if not isinstance(mode, str):
-            raise TypeError("mode must be a string")
-        if not mode.strip():
-            raise ValueError("mode must not be empty")
-        if not isinstance(relaxation, str):
-            raise TypeError("relaxation must be a string")
-        if not relaxation.strip():
-            raise ValueError("relaxation must not be empty")
-        if not isinstance(fidelity, bool):
-            raise TypeError("fidelity must be a bool")
-        if not isinstance(record_ops, bool):
-            raise TypeError("record_ops must be a bool")
-        if not isinstance(hard_shadow, bool):
-            raise TypeError("hard_shadow must be a bool")
-        self.mode = mode
-        self.relaxation = relaxation
-        self.fidelity = fidelity
-        self.record_ops_enabled = record_ops
-        self.hard_shadow = hard_shadow
+        self.mode = _require_nonempty_str(mode, name="mode")
+        self.relaxation = _require_nonempty_str(relaxation, name="relaxation")
+        self.fidelity = _require_bool(fidelity, name="fidelity")
+        self.record_ops_enabled = _require_bool(record_ops, name="record_ops")
+        self.hard_shadow = _require_bool(hard_shadow, name="hard_shadow")
+        if self.fidelity and not self.hard_shadow:
+            raise ValueError(
+                "fidelity=True requires hard_shadow=True; "
+                "hard-vs-soft metrics are meaningless without hard shadows"
+            )
         self.ops: list[OpNode] = []
         self.branches: list[BranchNode] = []
         self.searches: list[SearchNode] = []
@@ -214,6 +218,8 @@ class TraceContext:
         self.loops.append(frame)
 
     def hard_path(self) -> list[str]:
+        from .fidelity import loop_decision_label
+
         events: list[tuple[int, str]] = []
         for branch in self.branches:
             if not branch.on_hard_path:
@@ -239,7 +245,7 @@ class TraceContext:
             # Soft-only unroll frames after hard exit are omitted from the hard path.
             if not loop.on_hard_path or loop.hard_continue_score is None:
                 continue
-            decision = "continue" if loop.hard_alive else "stop"
+            decision = loop_decision_label(loop)
             events.append(
                 (
                     loop.id,
@@ -315,6 +321,8 @@ class TraceContext:
         return export_svg(self, path)
 
     def show(self) -> str:
+        from .fidelity import loop_decision_label
+
         lines = ["ProgramGrad trace"]
         lines.append(
             f"mode={self.mode}, relaxation={self.relaxation}, "
@@ -352,7 +360,7 @@ class TraceContext:
                     if loop.hard_carried_state is None
                     else f"{loop.hard_carried_state:.6g}"
                 )
-                decision = "continue" if loop.hard_alive else "stop"
+                decision = loop_decision_label(loop)
                 lines.append(
                     f"  #{loop.id} iteration={loop.iteration_index} hard={decision} "
                     f"hard_state={hard_state} soft_state={loop.carried_state:.6g} gate={gate}"
